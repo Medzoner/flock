@@ -9,100 +9,145 @@
 name: PR gate
 
 on:
-  # pull_request_target, so the token can comment on and close PRs from forks. It never checks
-  # out or runs the PR's code.
-  pull_request_target:
-    # "edited": a PR's base can be changed after it's opened. "synchronize": a docs-only PR can
-    # get other changes pushed to it.
-    types: [opened, reopened, edited, synchronize]
+    # pull_request_target, so the token can comment on and close PRs from forks. It never checks
+    # out or runs the PR's code.
+    pull_request_target:
+        # "edited": a PR's base can be changed after it's opened. "synchronize": a docs-only PR can
+        # get other changes pushed to it.
+        types: [ opened, reopened, edited, synchronize ]
 
 permissions:
-  issues: read
-  pull-requests: write
+    issues: read
+    pull-requests: write
 
 jobs:
-  gate:
-    name: Approved issue
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/github-script@v9
-        with:
-          script: |
-            const OPEN_TO_ANYONE = 'help wanted';
-            const pr = context.payload.pull_request;
-            const author = pr.user.login;
-            const { owner, repo } = context.repo;
+    gate:
+        name: Approved issue
+        runs-on: ubuntu-latest
+        steps:
+            -   uses: actions/github-script@v9
+                with:
+                    #language=javascript
+                    script: |
+                        const CLOSED_BY_GATE = '<!-- pr-gate:closed -->';
+                        const OPEN_TO_ANYONE = 'help wanted';
+                        const pullNumber = context.payload.pull_request.number;
+                        const {owner, repo} = context.repo;
+                        const getPullRequest = async () => {
+                            const {data: pr} = await github.rest.pulls.get({owner, repo, pull_number: pullNumber});
+                            return pr;
+                        };
+                        let pr = await getPullRequest();
+                        const author = pr.user.login;
 
-            if (['OWNER', 'MEMBER', 'COLLABORATOR'].includes(pr.author_association) || pr.user.type === 'Bot') {
-              core.info(`${author} is a collaborator or bot`);
-              return;
-            }
-            // An org member whose membership is private shows up as a CONTRIBUTOR above; what they
-            // may do in the repository says who they are.
-            const { data: access } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: author });
-            if (['admin', 'write'].includes(access.permission)) {
-              core.info(`${author} has ${access.permission} access`);
-              return;
-            }
-            if (pr.state !== 'open') return;
-            // An edit to the title or body doesn't re-check the issue; only a change of base does.
-            if (context.payload.action === 'edited' && !context.payload.changes?.base) return;
+                        if (['OWNER', 'MEMBER', 'COLLABORATOR'].includes(pr.author_association) || pr.user.type === 'Bot') {
+                            core.info(`${author} is a collaborator or bot`);
+                            return;
+                        }
+                        // An org member whose membership is private shows up as a CONTRIBUTOR above; what they
+                        // may do in the repository says who they are.
+                        const {data: access} = await github.rest.repos.getCollaboratorPermissionLevel({owner, repo, username: author});
+                        if (['admin', 'write'].includes(access.permission)) {
+                            core.info(`${author} has ${access.permission} access`);
+                            return;
+                        }
+                        const close = async (reason, nextStep = 'Edit this pull request\'s description to reference an approved issue, then save it to reopen automatically.') => {
+                            await github.rest.issues.createComment({
+                                owner, repo, issue_number: pullNumber,
+                                body: `Thanks for the PR, @${author}! ${reason} ${nextStep} See [CONTRIBUTING.md](https://github.com/${owner}/${repo}/blob/main/CONTRIBUTING.md).\n\n${CLOSED_BY_GATE}`,
+                            });
+                            await github.rest.pulls.update({owner, repo, pull_number: pullNumber, state: 'closed'});
+                        };
 
-            const close = async (reason) => {
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: pr.number,
-                body: `Thanks for the PR, @${author}! ${reason} See [CONTRIBUTING.md](https://github.com/${owner}/${repo}/blob/main/CONTRIBUTING.md).`,
-              });
-              await github.rest.pulls.update({ owner, repo, pull_number: pr.number, state: 'closed' });
-            };
+                        // Issues the PR body references: "#123", or one in this repo or the other Flock repo
+                        // ("flock-php/binaries#123" or a link to it). Work on Flock often spans both, so an
+                        // approved issue in either one counts.
+                        const REPOS = ['flock', 'binaries'];
+                        const approvedIssue = async () => {
+                            const body = pr.body ?? '';
+                            const refs = new Map();
+                            const add = (r, n) => refs.set(`${r}#${n}`, {repo: r, issue_number: Number(n)});
+                            for (const m of body.matchAll(/(?:^|[^\w/])#(\d+)\b/g)) add(repo, m[1]);
+                            const ref = new RegExp(`${owner}/(${REPOS.join('|')})(?:#|/issues/)(\\d+)\\b`, 'gi');
+                            for (const m of body.matchAll(ref)) add(m[1].toLowerCase(), m[2]);
 
-            if (pr.base.ref !== 'main') {
-              await close(`Pull requests go into \`main\`, not \`${pr.base.ref}\`, so this one is closed. Please open a new one against \`main\`.`);
-              return;
-            }
-            if (context.payload.action === 'edited') return;
+                            for (const [name, {repo: issueRepo, issue_number}] of refs) {
+                                let issue;
+                                try {
+                                    ({data: issue} = await github.rest.issues.get({owner, repo: issueRepo, issue_number}));
+                                } catch {
+                                    continue;
+                                }
+                                if (issue.pull_request || issue.state !== 'open') continue;
+                                if (issue.labels.some(l => l.name === OPEN_TO_ANYONE)) return name;
+                                if (issue.assignees.some(a => a.login === author)) return name;
+                            }
+                        };
 
-            // Docs-only: every changed file is in docs/, before and after a rename.
-            const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: pr.number, per_page: 100 });
-            const inDocs = path => path.startsWith('docs/');
-            if (files.every(f => inDocs(f.filename) && (!f.previous_filename || inDocs(f.previous_filename)))) {
-              core.info('Only docs/ changed');
-              return;
-            }
-            const pushed = context.payload.action === 'synchronize';
+                        const gateClosed = async () => {
+                            const comments = await github.paginate(github.rest.issues.listComments, {
+                                owner, repo, issue_number: pullNumber, per_page: 100,
+                            });
+                            return comments.some(comment =>
+                                comment.user?.login === 'github-actions[bot]' && comment.body?.includes(CLOSED_BY_GATE),
+                            );
+                        };
 
-            // Issues the PR body references: "#123", or one in this repo or the other Flock repo
-            // ("flock-php/binaries#123" or a link to it). Work on Flock often spans both, so an
-            // approved issue in either one counts.
-            const REPOS = ['flock', 'binaries'];
-            const body = pr.body ?? '';
-            const refs = new Map();
-            const add = (r, n) => refs.set(`${r}#${n}`, { repo: r, issue_number: Number(n) });
-            for (const m of body.matchAll(/(?:^|[^\w/])#(\d+)\b/g)) add(repo, m[1]);
-            const ref = new RegExp(`${owner}/(${REPOS.join('|')})(?:#|/issues/)(\\d+)\\b`, 'gi');
-            for (const m of body.matchAll(ref)) add(m[1].toLowerCase(), m[2]);
+                        if (pr.state === 'closed') {
+                            if (
+                                context.payload.action === 'edited' &&
+                                context.payload.changes?.body &&
+                                !pr.merged &&
+                                pr.base.ref === 'main' &&
+                                await gateClosed()
+                            ) {
+                                const issue = await approvedIssue();
+                                if (issue) {
+                                    await github.rest.pulls.update({owner, repo, pull_number: pullNumber, state: 'open'});
+                                    await github.rest.issues.createComment({
+                                        owner, repo, issue_number: pullNumber,
+                                        body: `Thanks, @${author}! This pull request references approved issue ${issue}, so it has been reopened.`,
+                                    });
+                                }
+                            }
+                            return;
+                        }
 
-            for (const [name, { repo: issueRepo, issue_number }] of refs) {
-              let issue;
-              try {
-                ({ data: issue } = await github.rest.issues.get({ owner, repo: issueRepo, issue_number }));
-              } catch {
-                continue;
-              }
-              if (issue.pull_request || issue.state !== 'open') continue;
-              if (issue.labels.some(l => l.name === OPEN_TO_ANYONE)) {
-                core.info(`${name} is labelled "${OPEN_TO_ANYONE}"`);
-                return;
-              }
-              if (issue.assignees.some(a => a.login === author)) {
-                core.info(`${name} is assigned to ${author}`);
-                return;
-              }
-            }
+                        if (pr.base.ref !== 'main') {
+                            await close(
+                                `Pull requests go into \`main\`, not \`${pr.base.ref}\`, so this one is closed.`,
+                                'Please open a new pull request against \`main\`.',
+                            );
+                            return;
+                        }
+                        // An edit to the title or body does not close an already-open PR. A body edit may reopen
+                        // only a PR this gate closed, above.
+                        if (context.payload.action === 'edited' && !context.payload.changes?.base) return;
 
-            await close(
-              (pushed
-                ? 'This pull request now changes files outside `docs/`, which needs an issue a maintainer has approved, so it is closed. '
-                : 'Flock takes pull requests only for issues a maintainer has approved, so this one is closed. ') +
-              `Please open an issue describing the problem or idea first. Once it's labelled \`${OPEN_TO_ANYONE}\` or assigned to you, open a new PR against \`main\` that references it (e.g. \`Fixes #123\`).`,
-            );
+                        // Docs-only: every changed file is in docs/, before and after a rename.
+                        const files = await github.paginate(github.rest.pulls.listFiles, {owner, repo, pull_number: pullNumber, per_page: 100});
+                        const inDocs = path => path.startsWith('docs/');
+                        if (files.every(f => inDocs(f.filename) && (!f.previous_filename || inDocs(f.previous_filename)))) {
+                            core.info('Only docs/ changed');
+                            return;
+                        }
+                        const pushed = context.payload.action === 'synchronize';
+
+                        for (let attempt = 0; attempt < 3; attempt++) {
+                            const issue = await approvedIssue();
+                            if (issue) {
+                                core.info(`${issue} is approved for ${author}`);
+                                return;
+                            }
+                            if (context.payload.action !== 'opened' || attempt === 2) break;
+                            await new Promise(resolve => setTimeout(resolve, 3_000));
+                            pr = await getPullRequest();
+                            if (pr.state !== 'open' || pr.merged) return;
+                        }
+
+                        await close(
+                          (pushed
+                            ? 'This pull request now changes files outside `docs/`, which needs an issue a maintainer has approved, so it is closed. '
+                            : 'Flock takes pull requests only for issues a maintainer has approved, so this one is closed. ') +
+                          `Please open an issue describing the problem or idea first. Once it's labelled \`${OPEN_TO_ANYONE}\` or assigned to you, open a new PR against \`main\` that references it (e.g. \`Fixes #123\`).`,
+                        );
