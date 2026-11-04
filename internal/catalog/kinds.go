@@ -78,7 +78,14 @@ func sqlSpec(goos string, p Paths, port int, server, admin string, initialise fu
 			return supervisor.Spec{}, fmt.Errorf("initialise the data directory: %w", err)
 		}
 	}
-	args := []string{"--no-defaults", "--basedir=" + p.Dir, "--datadir=" + p.Data,
+	options, err := ensureOptionFile(p.Data)
+	if err != nil {
+		return supervisor.Spec{}, err
+	}
+	// --defaults-file must come first. It reads only the data directory's option file, so a
+	// my.cnf elsewhere (Homebrew's, /etc/my.cnf, ~/.my.cnf) still has no effect, and MySQL loads
+	// SET PERSIST values from mysqld-auto.cnf. The flags after it win over the file.
+	args := []string{"--defaults-file=" + options, "--basedir=" + p.Dir, "--datadir=" + p.Data,
 		"--bind-address=127.0.0.1", fmt.Sprintf("--port=%d", port)}
 	if goos != "windows" {
 		run, err := paths.EnsureRun(p.Root)
@@ -100,6 +107,32 @@ func sqlSpec(goos string, p Paths, port int, server, admin string, initialise fu
 		}
 	}
 	return spec, nil
+}
+
+// optionFileTemplate is the my.cnf Flock writes into a new MySQL or MariaDB data directory.
+const optionFileTemplate = `# Server settings for this MySQL or MariaDB data directory. Flock reads this file when it
+# starts the server and never overwrites it. Restart Flock (flock restart) after changing it.
+#
+# Flock sets the port, socket, bind address and directories itself, so those are ignored here.
+
+[mysqld]
+# sql_mode = STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO
+# max_allowed_packet = 256M
+`
+
+// ensureOptionFile returns the data directory's my.cnf, creating it from the template when it
+// doesn't exist. An existing one, edited or not, is left as it is.
+func ensureOptionFile(data string) (string, error) {
+	path := filepath.Join(data, "my.cnf")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return path, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("create %s: %w", path, err)
+	}
+	_, err = f.WriteString(optionFileTemplate)
+	return path, errors.Join(err, f.Close())
 }
 
 // ---------------------------------------------------------------------------------------------
