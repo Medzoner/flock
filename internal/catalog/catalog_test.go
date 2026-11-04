@@ -517,6 +517,41 @@ func TestSQLSpecReadsTheDataDirectorysOptionFile(t *testing.T) {
 	}
 }
 
+func TestSQLSpecRefusesPersistedSettingsFlockManages(t *testing.T) {
+	root := t.TempDir()
+	p := Paths{Root: root, Dir: filepath.Join(root, "services", "mysql", "8.4.13"), Data: DataDir(root, "mysql", "8.4")}
+	_ = os.MkdirAll(p.Data, 0o700)
+	_ = os.WriteFile(filepath.Join(p.Data, "ibdata1"), nil, 0o600)
+	auto := filepath.Join(p.Data, "mysqld-auto.cnf")
+	spec := func() error {
+		_, err := sqlSpec("darwin", p, 3306, "mysqld", "mysqladmin", func() error { return nil }, "--mysqlx=OFF")
+		return err
+	}
+	persisted := func(section, name string) string {
+		return fmt.Sprintf(`{"Version": 2, %q: {%q: {"Value": "1", "Metadata": {"Host": "localhost", "User": "root", "Timestamp": 1}}}}`, section, name)
+	}
+
+	// No file (MariaDB, or MySQL before any SET PERSIST), or only settings Flock doesn't set.
+	for _, content := range []string{"", `{"Version": 2}`, persisted("mysql_dynamic_variables", "max_allowed_packet"),
+		persisted("mysql_static_variables", "ngram_token_size"), "not json"} {
+		_ = os.Remove(auto)
+		if content != "" {
+			_ = os.WriteFile(auto, []byte(content), 0o600)
+		}
+		if err := spec(); err != nil {
+			t.Fatalf("%q: %v", content, err)
+		}
+	}
+
+	// A port written by hand would win over --port: refuse, and say where and what.
+	for _, name := range []string{"port", "bind_address", "bind-address", "socket", "datadir", "basedir"} {
+		_ = os.WriteFile(auto, []byte(persisted("mysql_static_variables", name)), 0o600)
+		if err := spec(); err == nil || !strings.Contains(err.Error(), auto) || !strings.Contains(err.Error(), name) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
 func TestPreparesTrimWhatFlockDoesntNeed(t *testing.T) {
 	dir := t.TempDir()
 	for _, f := range []string{"bin/mysqld", "bin/mysqld-debug", "lib/libmysql.a", "mysql-test/x", "lib/plugin/debug/x.so", "share/english/errmsg.sys"} {

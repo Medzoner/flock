@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -82,9 +84,13 @@ func sqlSpec(goos string, p Paths, port int, server, admin string, initialise fu
 	if err != nil {
 		return supervisor.Spec{}, err
 	}
+	if err := checkPersisted(p.Data); err != nil {
+		return supervisor.Spec{}, err
+	}
 	// --defaults-file must come first. It reads only the data directory's option file, so a
 	// my.cnf elsewhere (Homebrew's, /etc/my.cnf, ~/.my.cnf) still has no effect, and MySQL loads
-	// SET PERSIST values from mysqld-auto.cnf. The flags after it win over the file.
+	// SET PERSIST values from mysqld-auto.cnf. The flags after it win over my.cnf, though not
+	// over mysqld-auto.cnf: checkPersisted keeps Flock's own settings out of that one.
 	args := []string{"--defaults-file=" + options, "--basedir=" + p.Dir, "--datadir=" + p.Data,
 		"--bind-address=127.0.0.1", fmt.Sprintf("--port=%d", port)}
 	if goos != "windows" {
@@ -133,6 +139,40 @@ func ensureOptionFile(data string) (string, error) {
 	}
 	_, err = f.WriteString(optionFileTemplate)
 	return path, errors.Join(err, f.Close())
+}
+
+// flockManaged are the server settings Flock passes as flags. MySQL refuses to SET PERSIST them,
+// but one written into mysqld-auto.cnf by hand would still win over the flag on the next start.
+var flockManaged = []string{"port", "bind_address", "socket", "datadir", "basedir"}
+
+// checkPersisted returns an error when the data directory's mysqld-auto.cnf (MySQL's SET PERSIST
+// file; MariaDB has none) holds a setting Flock manages, so the server doesn't start somewhere
+// Flock doesn't expect. A file MySQL can't read either is left for mysqld to report.
+func checkPersisted(data string) error {
+	path := filepath.Join(data, "mysqld-auto.cnf")
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var sections map[string]json.RawMessage
+	if json.Unmarshal(raw, &sections) != nil {
+		return nil
+	}
+	for _, section := range sections {
+		var variables map[string]json.RawMessage
+		if json.Unmarshal(section, &variables) != nil {
+			continue // "Version" is a number
+		}
+		for name := range variables {
+			if slices.Contains(flockManaged, strings.ReplaceAll(strings.ToLower(name), "-", "_")) {
+				return fmt.Errorf("%s persists %s, which Flock sets itself: remove it from that file, then start the service again", path, name)
+			}
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------------------------
