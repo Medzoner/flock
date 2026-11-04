@@ -275,10 +275,20 @@ func (w *rewriteWriter) finish() {
 	if w.chunks != nil {
 		close(w.chunks)
 		<-w.done
-		// Trailers the handler set (reverse_proxy passes the upstream's) still go out.
+		// Trailers the handler set (reverse_proxy passes the upstream's) still go out: those with
+		// http.TrailerPrefix, and those it declared in Trailer before the headers went out.
+		h := w.ResponseWriter.Header()
 		for k, v := range w.header {
 			if strings.HasPrefix(k, http.TrailerPrefix) {
-				w.ResponseWriter.Header()[k] = v
+				h[k] = v
+			}
+		}
+		for _, names := range w.header.Values("Trailer") {
+			for name := range strings.SplitSeq(names, ",") {
+				k := http.CanonicalHeaderKey(strings.TrimSpace(name))
+				if v, ok := w.header[k]; ok {
+					h[k] = v
+				}
 			}
 		}
 	}
