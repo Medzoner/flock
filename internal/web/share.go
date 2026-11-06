@@ -2,7 +2,6 @@ package web
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"io"
 	"mime"
@@ -188,16 +187,27 @@ func blockedSharePath(p string) bool {
 	return false
 }
 
-// rewriteWriter passes a response through, except an HTML page while the dev server runs. Those
-// pages are buffered until the handler returns, then viteAssets.rewriteHTML rewrites them.
+// rewriteWriter passes a response through, except a page while the dev server runs: that goes
+// through viteAssets.rewriteHTML on its way out, streamed (not buffered) so streamed pages still
+// stream.
 type rewriteWriter struct {
 	*caddyhttp.ResponseWriterWrapper
-	assets   *viteAssets
-	head     bool
-	buffer   bytes.Buffer
-	recorder caddyhttp.ResponseRecorder
+	assets *viteAssets
+	head   bool
 
 	wroteHeader bool
+	chunks      chan []byte // to the rewriting goroutine, when rewriting
+	done        chan struct{}
+	// header is the handler's copy of the headers while rewriting: the response's own are the
+	// rewriting goroutine's, since encode sends them with the first write.
+	header http.Header
+}
+
+func (w *rewriteWriter) Header() http.Header {
+	if w.header != nil {
+		return w.header
+	}
+	return w.ResponseWriter.Header()
 }
 
 // rewrites reports whether a response is a page to rewrite: a complete, uncompressed HTML 200.
@@ -217,10 +227,10 @@ func (w *rewriteWriter) WriteHeader(status int) {
 	if !w.head && rewrites(status, w.Header()) {
 		w.Header().Del("Content-Length")
 		w.Header().Del("ETag")
-		w.recorder = caddyhttp.NewResponseRecorder(w.ResponseWriter, &w.buffer, func(int, http.Header) bool {
-			return true
-		})
-		w.recorder.WriteHeader(status)
+		w.header = w.Header().Clone()
+		w.chunks, w.done = make(chan []byte, 16), make(chan struct{})
+		w.ResponseWriter.WriteHeader(status)
+		go w.rewrite()
 		return
 	}
 	if rewrites(status, w.Header()) {
@@ -233,10 +243,11 @@ func (w *rewriteWriter) Write(p []byte) (int, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
-	if w.recorder != nil {
-		return w.recorder.Write(p)
+	if w.chunks == nil {
+		return w.ResponseWriter.Write(p)
 	}
-	return w.ResponseWriter.Write(p)
+	w.chunks <- append([]byte(nil), p...)
+	return len(p), nil
 }
 
 // ReadFrom keeps io.Copy (which the FastCGI proxy uses) from writing past the rewrite.
@@ -244,25 +255,92 @@ func (w *rewriteWriter) ReadFrom(r io.Reader) (int64, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
-	if w.recorder != nil {
-		return io.Copy(w.recorder, r)
+	if w.chunks == nil {
+		return io.Copy(w.ResponseWriter, r)
 	}
-	return io.Copy(w.ResponseWriter, r)
+	return io.Copy(writerOnly{w}, r)
 }
 
+// writerOnly hides ReadFrom, so io.Copy goes through Write.
+type writerOnly struct{ io.Writer }
+
+// Flush is left to the rewriting goroutine while it runs: it flushes whenever it has caught up.
 func (w *rewriteWriter) Flush() {
-	if w.recorder == nil {
+	if w.chunks == nil {
 		_ = http.NewResponseController(w.ResponseWriter).Flush()
 	}
 }
 
 func (w *rewriteWriter) finish() {
-	if w.recorder != nil {
-		w.ResponseWriter.WriteHeader(w.recorder.Status())
-		out := bufio.NewWriterSize(w.ResponseWriter, 32<<10)
-		_ = w.assets.rewriteHTML(out, w.recorder.Buffer())
-		_ = out.Flush()
+	if w.chunks != nil {
+		close(w.chunks)
+		<-w.done
+		// Trailers the handler set (reverse_proxy passes the upstream's) still go out: those with
+		// http.TrailerPrefix, and those it declared in Trailer before the headers went out.
+		h := w.ResponseWriter.Header()
+		for k, v := range w.header {
+			if strings.HasPrefix(k, http.TrailerPrefix) {
+				h[k] = v
+			}
+		}
+		for _, names := range w.header.Values("Trailer") {
+			for name := range strings.SplitSeq(names, ",") {
+				k := http.CanonicalHeaderKey(strings.TrimSpace(name))
+				if v, ok := w.header[k]; ok {
+					h[k] = v
+				}
+			}
+		}
 	}
+}
+
+func (w *rewriteWriter) rewrite() {
+	defer close(w.done)
+	// Tokens are small; buffered, the first write is big enough for encode to compress the page.
+	out := bufio.NewWriterSize(w.ResponseWriter, 32<<10)
+	flush := func() {
+		if out.Flush() == nil {
+			_ = http.NewResponseController(w.ResponseWriter).Flush()
+		}
+	}
+	r := &chunkReader{chunks: w.chunks, idle: flush}
+	defer func() {
+		// Whatever happens, drain the handler's writes so it never blocks.
+		for range w.chunks {
+		}
+	}()
+	_ = w.assets.rewriteHTML(out, r)
+	_ = out.Flush()
+}
+
+// chunkReader reads the chunks a handler writes, calling idle before it waits for more.
+type chunkReader struct {
+	chunks <-chan []byte
+	idle   func()
+	cur    []byte
+}
+
+func (r *chunkReader) Read(p []byte) (int, error) {
+	for len(r.cur) == 0 {
+		select {
+		case c, ok := <-r.chunks:
+			if !ok {
+				return 0, io.EOF
+			}
+			r.cur = c
+			continue
+		default:
+		}
+		r.idle()
+		c, ok := <-r.chunks
+		if !ok {
+			return 0, io.EOF
+		}
+		r.cur = c
+	}
+	n := copy(p, r.cur)
+	r.cur = r.cur[n:]
+	return n, nil
 }
 
 var (
