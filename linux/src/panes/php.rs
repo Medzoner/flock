@@ -227,7 +227,9 @@ impl Inner {
 
     fn release_row(self: &Rc<Self>, release: &PhpRelease) -> adw::ActionRow {
         let installed = !release.installed.is_empty();
-        let version = if release.update && release.latest != release.installed {
+        // A running or failed job takes the place of the update button, which names its target.
+        let job_shown = release.job.as_ref().is_some_and(|j| j.running() || j.failed());
+        let version = if release.update && release.latest != release.installed && job_shown {
             format!("{} → {}", release.installed, release.latest)
         } else if installed {
             release.installed.clone()
@@ -325,12 +327,18 @@ impl Inner {
                     update.set_tooltip_text(Some(&size));
                     actions.append(&update);
                 }
+                let mut items: Vec<MenuItem> = Vec::new();
                 if !release.default {
+                    // Next to the update button, it goes into the menu: the row's title keeps its room.
                     let (t, m) = (this.clone(), minor.clone());
-                    actions.append(&button(tr!("Make Default"), false, move || t.make_default(&m)));
+                    let make_default = move || t.make_default(&m);
+                    if release.update {
+                        items.push((tr!("Make Default").to_owned(), true, false, Box::new(make_default)));
+                    } else {
+                        actions.append(&button(tr!("Make Default"), false, make_default));
+                    }
                 }
                 let ini = self.inis.borrow().iter().find(|(v, _)| *v == minor).map(|(_, ini)| ini.clone()).unwrap_or_default();
-                let mut items: Vec<MenuItem> = Vec::new();
                 if !ini.is_empty() {
                     let r = row.clone();
                     items.push((tr!("Open php.ini").to_owned(), true, false, Box::new(move || open_file(&r, &ini))));

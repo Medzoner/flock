@@ -147,7 +147,7 @@ private struct NodeReleaseRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text("Node \(release.major)").font(.body.weight(.semibold)).fixedSize()
-                    Text(versionText).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                    Text(versionText).font(.callout.monospacedDigit()).foregroundStyle(.secondary).fixedSize()
                     if release.isDefault { Badge(text: "Default") }
                 }
                 detail
@@ -169,8 +169,9 @@ private struct NodeReleaseRow: View {
         }
     }
 
+    /// The installed version; an update's version is on its Update to button.
     private var versionText: String {
-        release.update ? "\(release.installed) → \(release.latest)" : (release.isInstalled ? release.installed : release.latest)
+        release.isInstalled ? release.installed : release.latest
     }
 
     /// The status line under the name.

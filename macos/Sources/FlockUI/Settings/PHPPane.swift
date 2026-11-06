@@ -161,7 +161,7 @@ private struct PHPReleaseRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text("PHP \(release.minor)").font(.body.weight(.semibold)).fixedSize()
-                    Text(versionText).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                    Text(versionText).font(.callout.monospacedDigit()).foregroundStyle(.secondary).fixedSize()
                     if release.isDefault { Badge(text: "Default") }
                     if release.prerelease {
                         Badge(text: "Pre-release", color: .orange).help("PHP \(release.latest) isn’t released yet — it may not work. Offered on the beta channel.")
@@ -190,8 +190,10 @@ private struct PHPReleaseRow: View {
         }
     }
 
+    /// The installed version; with "→ newer" only while no Update to button names the newer one
+    /// (an install of it runs or failed).
     private var versionText: String {
-        if release.update && release.latest != release.installed {
+        if release.update && release.latest != release.installed, let job = release.job, job.isRunning || job.isFailed {
             return "\(release.installed) → \(release.latest)"
         }
         return release.isInstalled ? release.installed : release.latest

@@ -9,7 +9,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 
 use super::common::{PaneView, ask_link, group, report};
-use super::versions::{badge, busy_button, button, checked_text, confirm, more_menu};
+use super::versions::{MenuItem, badge, busy_button, button, checked_text, confirm, more_menu};
 use super::{Data, Pane};
 use crate::api::{Client, Error, NodeRelease, NodeVersions, SettingsChange};
 use crate::i18n::tr;
@@ -174,13 +174,8 @@ impl Inner {
 
     fn release_row(self: &Rc<Self>, release: &NodeRelease) -> adw::ActionRow {
         let installed = !release.installed.is_empty();
-        let version = if release.update {
-            format!("{} → {}", release.installed, release.latest)
-        } else if installed {
-            release.installed.clone()
-        } else {
-            release.latest.clone()
-        };
+        // An update's target is on its button ("Update to 22.12.0"), so not here too.
+        let version = if installed { release.installed.clone() } else { release.latest.clone() };
         let row = adw::ActionRow::builder().title(format!("Node {}", release.major)).build();
         let icon = gtk::Image::from_icon_name("package-x-generic-symbolic");
         if !installed {
@@ -248,12 +243,19 @@ impl Inner {
                     this.run(&m, tr!("Updating npm to {version}…", version = npm), move |c| c.update_npm(&m2));
                 }));
             }
+            let mut items: Vec<MenuItem> = Vec::new();
             if !release.default {
+                // Next to an update button, it goes into the menu: the row's title keeps its room.
                 let (this, m) = (self.clone(), major.clone());
-                actions.append(&button(tr!("Make Default"), false, move || this.make_default(&m)));
+                let make_default = move || this.make_default(&m);
+                if release.update || !release.npm_latest.is_empty() {
+                    items.push((tr!("Make Default").to_owned(), true, false, Box::new(make_default)));
+                } else {
+                    actions.append(&button(tr!("Make Default"), false, make_default));
+                }
             }
             let (this, m, r) = (self.clone(), major.clone(), row.clone());
-            actions.append(&more_menu(vec![(
+            items.push((
                 tr!("Uninstall…").to_owned(),
                 !release.default,
                 true,
@@ -273,7 +275,8 @@ impl Inner {
                         },
                     );
                 }),
-            )]));
+            ));
+            actions.append(&more_menu(items));
         }
         row.add_suffix(&actions);
         row

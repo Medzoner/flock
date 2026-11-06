@@ -38,9 +38,12 @@ const VERSION: &str = match option_env!("FLOCK_VERSION") {
     None => "dev",
 };
 
-/// Styles libadwaita has no class for: the small labels next to versions and sites.
+/// Styles libadwaita has no class for: the small labels next to versions and sites. A row's title
+/// keeps a minimum width, so its suffixes (versions, badges, buttons; longer in Czech and Spanish)
+/// can't squeeze it into a letter per line: the window's minimum width grows instead.
 const STYLE: &str = "
 .badge { padding: 1px 7px; border-radius: 99px; font-weight: 600; background: alpha(currentColor, 0.12); }
+row > box.header > box.title { min-width: 150px; }
 ";
 
 /// The app's windows: the Flock window, created at start, and the others when first opened.
