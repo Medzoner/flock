@@ -184,17 +184,22 @@ private struct NodeReleaseRow: View {
             }
             .font(.caption).foregroundStyle(.secondary)
         } else {
-            HStack(spacing: 0) {
-                Text(release.update ? "Update available" : (release.isInstalled ? "Up to date" : "Not installed"))
-                    .foregroundStyle(release.update ? Color.blue : Color.secondary)
-                if !release.npm.isEmpty {
-                    Text(verbatim: " · npm \(release.npm)").foregroundStyle(.secondary)
-                    if !release.npmLatest.isEmpty {
-                        Text(" (npm \(release.npmLatest) available)").foregroundStyle(.blue)
+            // Versions never wrap; a newer npm gets a line of its own, as the row has no room left
+            // next to Update npm and Make Default in Czech and Spanish.
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 0) {
+                    Text(release.update ? "Update available" : (release.isInstalled ? "Up to date" : "Not installed"))
+                        .foregroundStyle(release.update ? Color.blue : Color.secondary)
+                    if !release.npm.isEmpty {
+                        Text(verbatim: " · npm \(release.npm)").foregroundStyle(.secondary)
                     }
+                }
+                if !release.npm.isEmpty, !release.npmLatest.isEmpty {
+                    Text("npm \(release.npmLatest) available").foregroundStyle(.blue)
                 }
             }
             .font(.caption)
+            .fixedSize()
         }
     }
 

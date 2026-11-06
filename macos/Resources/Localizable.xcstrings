@@ -1,22 +1,6 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-    " (npm %@ available)" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : " (k dispozici npm %@)"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : " (npm %@ disponible)"
-          }
-        }
-      }
-    },
     "%@ %@" : {
       "shouldTranslate" : false
     },
@@ -6448,6 +6432,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "No hay coincidencias"
+          }
+        }
+      }
+    },
+    "npm %@ available" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "k dispozici npm %@"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "npm %@ disponible"
           }
         }
       }

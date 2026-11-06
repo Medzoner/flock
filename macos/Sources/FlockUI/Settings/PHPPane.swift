@@ -410,7 +410,7 @@ private struct FrankenPHPBuildRow: View {
                 .lineLimit(2)
                 .help("This build was withdrawn. Flock replaces it as soon as a fixed build is published.")
         } else {
-            Text(installedText).font(.caption).foregroundStyle(.secondary)
+            Text(installedText).font(.caption).foregroundStyle(.secondary).fixedSize()
         }
     }
 
