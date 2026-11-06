@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -249,13 +250,22 @@ func (w *rewriteWriter) ReadFrom(r io.Reader) (int64, error) {
 	return io.Copy(w.ResponseWriter, r)
 }
 
+func (w *rewriteWriter) Flush() {
+	if w.recorder == nil {
+		_ = http.NewResponseController(w.ResponseWriter).Flush()
+	}
+}
+
 func (w *rewriteWriter) finish() {
 	if w.recorder != nil {
 		w.ResponseWriter.WriteHeader(w.recorder.Status())
-		_ = w.assets.rewriteHTML(w.ResponseWriter, w.recorder.Buffer())
+		out := bufio.NewWriterSize(w.ResponseWriter, 32<<10)
+		_ = w.assets.rewriteHTML(out, w.recorder.Buffer())
+		_ = out.Flush()
 	}
 }
 
 var (
 	_ caddyhttp.MiddlewareHandler = (*shareHandler)(nil)
+	_ http.Flusher                = (*rewriteWriter)(nil)
 )
