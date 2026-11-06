@@ -97,7 +97,7 @@ struct NodePane: View {
             } else {
                 Text("Not checked yet")
             }
-            Text("·")
+            Text(verbatim: "·")
             Button {
                 checking = true
                 Task {
@@ -132,7 +132,7 @@ private struct NodeReleaseRow: View {
 
     /// The row's own work, or an install it didn't start, which shows the same way.
     private var step: String? {
-        busy ?? (installing ? "Downloading Node.js \(release.latest)…" : nil)
+        busy ?? (installing ? String(localized: "Downloading Node.js \(release.latest)…") : nil)
     }
     private let confirmUninstallState = State<Bool>(initialValue: false)
     private var confirmUninstall: Bool {
@@ -146,7 +146,7 @@ private struct NodeReleaseRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text("Node \(release.major)").font(.body.weight(.semibold))
+                    Text("Node \(release.major)").font(.body.weight(.semibold)).fixedSize()
                     Text(versionText).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                     if release.isDefault { Badge(text: "Default") }
                 }
@@ -154,13 +154,15 @@ private struct NodeReleaseRow: View {
             }
 
             Spacer(minLength: 12)
+            // The buttons keep their whole titles (longer in Czech and Spanish); the version wraps.
             actions
+                .fixedSize()
                 .disabled(step != nil)
         }
         .padding(.vertical, 3)
         .confirmationDialog("Uninstall Node \(release.major)?", isPresented: confirmUninstallState.projectedValue) {
             Button("Uninstall", role: .destructive) {
-                run("Uninstalling…") { try await $0.uninstallNode(release.major) }
+                run(String(localized: "Uninstalling…")) { try await $0.uninstallNode(release.major) }
             }
         } message: {
             Text("Its global npm packages are removed too. Projects and sites that use Node \(release.major) fall back to the default version until you install it again.")
@@ -185,7 +187,7 @@ private struct NodeReleaseRow: View {
                 Text(release.update ? "Update available" : (release.isInstalled ? "Up to date" : "Not installed"))
                     .foregroundStyle(release.update ? Color.blue : Color.secondary)
                 if !release.npm.isEmpty {
-                    Text(" · npm \(release.npm)").foregroundStyle(.secondary)
+                    Text(verbatim: " · npm \(release.npm)").foregroundStyle(.secondary)
                     if !release.npmLatest.isEmpty {
                         Text(" (npm \(release.npmLatest) available)").foregroundStyle(.blue)
                     }
@@ -199,7 +201,7 @@ private struct NodeReleaseRow: View {
     private var actions: some View {
         if !release.isInstalled {
             Button {
-                run("Downloading Node.js \(release.latest)…") { try await $0.installNodeMajor(release.major) }
+                run(String(localized: "Downloading Node.js \(release.latest)…")) { try await $0.installNodeMajor(release.major) }
             } label: {
                 Label("Install", systemImage: "arrow.down.circle")
             }
@@ -207,7 +209,7 @@ private struct NodeReleaseRow: View {
         } else {
             if release.update {
                 Button {
-                    run("Downloading Node.js \(release.latest)…") { try await $0.installNodeMajor(release.major) }
+                    run(String(localized: "Downloading Node.js \(release.latest)…")) { try await $0.installNodeMajor(release.major) }
                 } label: {
                     Label("Update to \(release.latest)", systemImage: "arrow.down.circle")
                 }
@@ -216,13 +218,13 @@ private struct NodeReleaseRow: View {
             }
             if !release.npmLatest.isEmpty {
                 Button("Update npm") {
-                    run("Updating npm to \(release.npmLatest)…") { try await $0.updateNpm(release.major) }
+                    run(String(localized: "Updating npm to \(release.npmLatest)…")) { try await $0.updateNpm(release.major) }
                 }
                 .help("Installs npm \(release.npmLatest), the newest npm that supports Node.js \(release.installed), for Node \(release.major)")
             }
             if !release.isDefault {
                 Button("Make Default") {
-                    busy = "Making Node \(release.major) the default…"
+                    busy = String(localized: "Making Node \(release.major) the default…")
                     Task {
                         await model.settings.perform { _ = try await $0.updateSettings(SettingsChange(defaultNode: release.major)) }
                         await model.settings.refreshNode()

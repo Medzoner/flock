@@ -111,7 +111,7 @@ struct PHPPane: View {
             } else {
                 Text("Not checked yet")
             }
-            Text("·")
+            Text(verbatim: "·")
             Button {
                 checking = true
                 Task {
@@ -160,7 +160,7 @@ private struct PHPReleaseRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text("PHP \(release.minor)").font(.body.weight(.semibold))
+                    Text("PHP \(release.minor)").font(.body.weight(.semibold)).fixedSize()
                     Text(versionText).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                     if release.isDefault { Badge(text: "Default") }
                     if release.prerelease {
@@ -175,7 +175,9 @@ private struct PHPReleaseRow: View {
             if busy {
                 ProgressView().controlSize(.small)
             }
+            // The buttons keep their whole titles (longer in Czech and Spanish); the version wraps.
             actions
+                .fixedSize()
                 .disabled(busy)
         }
         .padding(.vertical, 3)
@@ -210,7 +212,7 @@ private struct PHPReleaseRow: View {
             }
             .font(.caption).foregroundStyle(.secondary)
         } else if let job = release.job, job.isFailed {
-            Text(job.error.isEmpty ? "The download failed." : job.error)
+            Text(job.error.isEmpty ? String(localized: "The download failed.") : job.error)
                 .font(.caption).foregroundStyle(.red)
                 .lineLimit(2)
                 .textSelection(.enabled)
@@ -227,9 +229,9 @@ private struct PHPReleaseRow: View {
 
     private var statusText: String {
         switch release.status {
-        case .installed: "Up to date"
-        case .update: release.latest == release.installed ? "A new build is available" : "Update available"
-        case .available: "Not installed"
+        case .installed: String(localized: "Up to date")
+        case .update: release.latest == release.installed ? String(localized: "A new build is available") : String(localized: "Update available")
+        case .available: String(localized: "Not installed")
         case .unknown: ""
         }
     }
@@ -237,16 +239,16 @@ private struct PHPReleaseRow: View {
     /// "Downloading… 42%", "Downloading…" (size unknown) or "Installing…".
     private static func jobText(_ job: ComponentJob) -> String {
         if job.phase == .installing {
-            return "Installing…"
+            return String(localized: "Installing…")
         }
         if let progress = job.progress {
-            return "Downloading… \(Int((progress * 100).rounded()))%"
+            return String(localized: "Downloading… \(Int((progress * 100).rounded()))%")
         }
-        return "Downloading…"
+        return String(localized: "Downloading…")
     }
 
     private var sizeHelp: String {
-        release.size > 0 ? "Downloads PHP \(release.latest) (\(release.size / 1_000_000) MB)" : ""
+        release.size > 0 ? String(localized: "Downloads PHP \(release.latest) (\(release.size / 1_000_000) MB)") : ""
     }
 
     @ViewBuilder
@@ -349,7 +351,7 @@ private struct FrankenPHPBuildRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text("PHP \(build.php)").font(.body.weight(.semibold))
+                    Text("PHP \(build.php)").font(.body.weight(.semibold)).fixedSize()
                     if build.prerelease {
                         Badge(text: "Pre-release", color: .orange).help("PHP \(build.latest) isn’t released yet — it may not work. Offered on the beta channel.")
                     }
@@ -361,7 +363,9 @@ private struct FrankenPHPBuildRow: View {
             if busy {
                 ProgressView().controlSize(.small)
             }
+            // The buttons keep their whole titles (longer in Czech and Spanish); the version wraps.
             actions
+                .fixedSize()
                 .disabled(busy)
         }
         .padding(.vertical, 3)
@@ -375,7 +379,7 @@ private struct FrankenPHPBuildRow: View {
     }
 
     private var installedText: String {
-        guard build.isInstalled else { return "Not installed · downloads by itself when a site uses it" }
+        guard build.isInstalled else { return String(localized: "Not installed · downloads by itself when a site uses it") }
         return build.phpVersion.isEmpty ? "FrankenPHP \(build.installed)" : "FrankenPHP \(build.installed) (PHP \(build.phpVersion))"
     }
 
@@ -393,7 +397,7 @@ private struct FrankenPHPBuildRow: View {
             }
             .font(.caption).foregroundStyle(.secondary)
         } else if let job = build.job, job.isFailed {
-            Text(job.error.isEmpty ? "The download failed." : job.error)
+            Text(job.error.isEmpty ? String(localized: "The download failed.") : job.error)
                 .font(.caption).foregroundStyle(.red)
                 .lineLimit(2)
                 .textSelection(.enabled)
@@ -411,12 +415,12 @@ private struct FrankenPHPBuildRow: View {
     /// "Downloading… 42%", "Downloading…" (size unknown) or "Installing…".
     private static func jobText(_ job: ComponentJob) -> String {
         if job.phase == .installing {
-            return "Installing…"
+            return String(localized: "Installing…")
         }
         if let progress = job.progress {
-            return "Downloading… \(Int((progress * 100).rounded()))%"
+            return String(localized: "Downloading… \(Int((progress * 100).rounded()))%")
         }
-        return "Downloading…"
+        return String(localized: "Downloading…")
     }
 
     @ViewBuilder
@@ -451,7 +455,7 @@ private struct FrankenPHPBuildRow: View {
                     Label(build.latest == build.phpVersion ? "Update" : "Update to PHP \(build.latest)", systemImage: "arrow.down.circle")
                 }
                 .buttonStyle(.borderedProminent)
-                .help(build.size > 0 ? "Downloads FrankenPHP for PHP \(build.latest) (\(build.size / 1_000_000) MB)" : "")
+                .help(build.size > 0 ? String(localized: "Downloads FrankenPHP for PHP \(build.latest) (\(build.size / 1_000_000) MB)") : "")
             }
             if build.isInstalled {
                 Button("Uninstall…", role: .destructive) { confirmUninstall = true }
@@ -498,7 +502,7 @@ private struct PHPInstallLogSheet: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    Text(text.isEmpty ? "No install log yet." : text)
+                    Text(text.isEmpty ? String(localized: "No install log yet.") : text)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
