@@ -50,12 +50,27 @@ type Status struct {
 	Xdebug             bool                    `json:"xdebug"`           // Xdebug detection; see config.Config.Xdebug
 	XdebugBreakpoints  bool                    `json:"xdebug_breakpoints"`
 	Sites              []SiteStatus            `json:"sites"`
+	Proxies            []ProxyStatus           `json:"proxies,omitempty"` // see config.Proxy
 	Processes          []supervisor.ProcStatus `json:"processes"`
 	Warnings           []string                `json:"warnings,omitempty"`
 	Channel            string                  `json:"channel"` // see ChannelOf; the apps' own updates follow it too
 	// Defaults is set while there is no default PHP or Node.js yet: the first run installs the
 	// newest stable ones and makes them the defaults.
 	Defaults *DefaultsStatus `json:"defaults,omitempty"`
+}
+
+// ProxyStatus is a name served by a server of its own, e.g. a Node.js dev server (see config.Proxy).
+type ProxyStatus struct {
+	Name     string `json:"name"`
+	Domain   string `json:"domain"`
+	Upstream string `json:"upstream"` // e.g. "http://127.0.0.1:3000"
+	Secured  bool   `json:"secured"`
+	URL      string `json:"url,omitempty"`
+	Problem  string `json:"problem,omitempty"` // why it isn't served, e.g. a site serves its domain
+	// Running is set while something answers at the upstream. Server names it when it runs on this
+	// machine: "Node.js 22.23.4" (one of Flock's versions), "Node.js", or the program's name.
+	Running bool   `json:"running"`
+	Server  string `json:"server,omitempty"`
 }
 
 // DefaultsStatus is the first run's install of the default PHP and Node.js.
@@ -110,8 +125,14 @@ type SiteStatus struct {
 	NodeShadowed string `json:"node_shadowed"`
 	Secured      bool   `json:"secured"`
 	Parked       bool   `json:"parked"`
-	URL          string `json:"url,omitempty"`
-	Problem      string `json:"problem,omitempty"`
+	// Parent is set on a git worktree of another site: that site's name, whose settings it uses.
+	// Branch is the worktree's branch ("" when HEAD is detached).
+	Parent string `json:"parent,omitempty"`
+	Branch string `json:"branch,omitempty"`
+	// Worktree is the setup of a worktree Flock set up (nil for others).
+	Worktree *WorktreeStatus `json:"worktree,omitempty"`
+	URL      string          `json:"url,omitempty"`
+	Problem  string          `json:"problem,omitempty"`
 	// Notice is something about the site that needs a decision from the user but isn't broken,
 	// e.g. that Flock found no document root in it.
 	Notice string `json:"notice,omitempty"`
@@ -232,6 +253,22 @@ type Backend interface {
 	// that the site can be shared, with the app's debug mode on for visitors when debug is set.
 	Shares() *share.Manager
 	StartShare(site string, allow []string, debug bool) error
+	// CreateWorktree creates a git worktree of a site and starts its setup.
+	CreateWorktree(ctx context.Context, req WorktreeCreate) (WorktreeCreated, error)
+	// SiteBranches lists the git branches of a site, for where a new worktree's branch starts.
+	SiteBranches(ctx context.Context, name string) (WorktreeBranches, error)
+	// SetupWorktree starts the setup of the git worktree at path (ErrNotWorktree when it isn't
+	// one of a site's) with the database mode db ("" for flock.yml's), or joins the one that runs;
+	// one set up already is left alone unless again.
+	SetupWorktree(path string, again bool, db string) (WorktreeStatus, error)
+	// SwitchWorktreeDatabase gives the worktree a database by mode as its job, dropping the one
+	// Flock made for it.
+	SwitchWorktreeDatabase(path, mode string) (WorktreeStatus, error)
+	// WorktreeSetup is the state of the worktree's setup, nil when Flock hasn't set it up.
+	WorktreeSetup(path string) (*WorktreeStatus, error)
+	// RemoveWorktree runs the worktree's before_delete hook, removes it with git and drops the
+	// database Flock made for it, returning what they printed.
+	RemoveWorktree(ctx context.Context, path string, force bool) (string, error)
 }
 
 // NewHandler builds the API routes. A non-empty token requires `Authorization: Bearer <token>`
@@ -277,6 +314,7 @@ func NewHandler(b Backend, token string) http.Handler {
 	registerMCP(mux, b)
 	registerBoost(mux, b)
 	registerShares(mux, b)
+	registerWorktrees(mux, b)
 
 	if token == "" {
 		return mux
@@ -345,6 +383,9 @@ func (c *Client) UpdateSettings(ctx context.Context, s Settings) (Status, error)
 	return status, err
 }
 
+// writeTimeout is how long any request but a GET may take, at least.
+const writeTimeout = 30 * time.Second
+
 // slow is the client for requests that wait on the network or copy files (checks, installs).
 func (c *Client) slow() *Client {
 	return c.timeout(2 * time.Minute)
@@ -381,7 +422,13 @@ func (c *Client) send(ctx context.Context, method, path string, body, out any) e
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.http.Do(req)
+	client := c.http
+	// A change reloads the daemon, which may start PHP: the first start after an install can take
+	// several seconds while an antivirus scans it.
+	if method != http.MethodGet && client.Timeout < writeTimeout {
+		client = &http.Client{Transport: client.Transport, Timeout: writeTimeout}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		var opErr *net.OpError
 		if errors.As(err, &opErr) && opErr.Op == "dial" {

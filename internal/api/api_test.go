@@ -45,6 +45,22 @@ func (f *fakeBackend) Binaries() *binaries.Catalog             { return f.binari
 func (f *fakeBackend) RestartSite(string) error                { return nil }
 func (f *fakeBackend) Shares() *share.Manager                  { return nil }
 func (f *fakeBackend) StartShare(string, []string, bool) error { return nil }
+func (f *fakeBackend) CreateWorktree(context.Context, WorktreeCreate) (WorktreeCreated, error) {
+	return WorktreeCreated{}, ErrInvalidRequest
+}
+func (f *fakeBackend) SiteBranches(context.Context, string) (WorktreeBranches, error) {
+	return WorktreeBranches{}, ErrInvalidRequest
+}
+func (f *fakeBackend) SetupWorktree(string, bool, string) (WorktreeStatus, error) {
+	return WorktreeStatus{}, ErrNotWorktree
+}
+func (f *fakeBackend) SwitchWorktreeDatabase(string, string) (WorktreeStatus, error) {
+	return WorktreeStatus{}, ErrNotWorktree
+}
+func (f *fakeBackend) WorktreeSetup(string) (*WorktreeStatus, error) { return nil, ErrNotWorktree }
+func (f *fakeBackend) RemoveWorktree(context.Context, string, bool) (string, error) {
+	return "", ErrNotWorktree
+}
 
 func (f *fakeBackend) Status() Status      { return Status{Sites: f.sites} }
 func (f *fakeBackend) Reload() error       { return nil }
@@ -529,5 +545,44 @@ func TestSiteDocumentRootEndpoints(t *testing.T) {
 	}
 	if site, _ := b.config(t).FindSite("zoo"); site.Root != "" {
 		t.Fatalf("root not cleared: %+v", site)
+	}
+}
+
+func TestProxyEndpoints(t *testing.T) {
+	b := &fakeBackend{root: t.TempDir()}
+	srv := serve(t, b, "")
+
+	if resp, body := call(t, "POST", srv.URL+"/v1/proxies", "", `{"name":"Soft Pack","upstream":"3000"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("proxy: %d %s", resp.StatusCode, body)
+	}
+	if p, ok := b.config(t).FindProxy("soft-pack"); !ok || p.Upstream != "http://127.0.0.1:3000" || p.Secured {
+		t.Fatalf("proxy not stored: %+v", b.config(t).Proxies)
+	}
+
+	if resp, body := call(t, "PATCH", srv.URL+"/v1/proxies/soft-pack", "", `{"secured":true}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("secure: %d %s", resp.StatusCode, body)
+	}
+	// A new upstream keeps the proxy secured.
+	if resp, body := call(t, "POST", srv.URL+"/v1/proxies", "", `{"name":"soft-pack","upstream":"localhost:3001"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("re-proxy: %d %s", resp.StatusCode, body)
+	}
+	if p, _ := b.config(t).FindProxy("soft-pack"); p.Upstream != "http://localhost:3001" || !p.Secured {
+		t.Fatalf("re-proxy: %+v", p)
+	}
+
+	for _, bad := range []string{`{"name":"x","upstream":"ftp://h:1"}`, `{"name":"x","upstream":""}`, `{"name":"","upstream":"3000"}`} {
+		if resp, _ := call(t, "POST", srv.URL+"/v1/proxies", "", bad); resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s must be rejected, got %d", bad, resp.StatusCode)
+		}
+	}
+	if resp, _ := call(t, "PATCH", srv.URL+"/v1/proxies/missing", "", `{"secured":true}`); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("patching a missing proxy, got %d", resp.StatusCode)
+	}
+
+	if resp, _ := call(t, "DELETE", srv.URL+"/v1/proxies/soft-pack", "", ""); resp.StatusCode != http.StatusOK || len(b.config(t).Proxies) != 0 {
+		t.Fatalf("unproxy: %d %+v", resp.StatusCode, b.config(t).Proxies)
+	}
+	if resp, _ := call(t, "DELETE", srv.URL+"/v1/proxies/soft-pack", "", ""); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unproxying twice, got %d", resp.StatusCode)
 	}
 }

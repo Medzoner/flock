@@ -1,7 +1,7 @@
 //! The tray icon, a StatusNotifierItem: KDE shows them, Ubuntu's GNOME through its AppIndicator
 //! extension. Its icon follows the daemon's state like the Windows tray icon and the macOS menu
 //! bar icon. Trays only show menus, so the menu carries what the Windows and macOS panels show at a
-//! glance: the status, sites, Mail and Dumps counts and the Xdebug and dumps toggles. Desktops
+//! glance: the status, sites and proxies, Mail and Dumps counts and the Xdebug and dumps toggles. Desktops
 //! without a tray (GNOME without the extension) keep the main window instead.
 //!
 //! ksni serves the item from its own thread; the menu's actions come back to the GTK main loop
@@ -16,7 +16,7 @@ use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::{CheckmarkItem, MenuItem, StandardItem, SubMenu};
 
 use crate::APP_ID;
-use crate::api::SettingsChange;
+use crate::api::{ProxyStatus, SettingsChange, SiteStatus, Status};
 use crate::model::AppModel;
 
 /// What the tray asks the app to do, on the main loop.
@@ -44,8 +44,10 @@ struct State {
     warning: Option<String>,
     needs_setup: bool,
     running: bool,
-    /// Each site's domain and URL; problems are in the main window.
-    sites: Vec<(String, Option<String>)>,
+    /// The sites, each with its worktrees; problems are in the main window.
+    sites: Vec<SiteItem>,
+    /// The proxies (`flock proxy`), after the sites.
+    proxies: Vec<SiteItem>,
     mail_count: u32,
     dump_count: u32,
     xdebug: bool,
@@ -68,15 +70,55 @@ impl State {
             running: model.status().is_some(),
             warning: status.as_ref().and_then(|s| s.warnings.first().cloned()),
             needs_setup,
-            sites: status
-                .as_ref()
-                .map(|s| s.sites.iter().map(|site| (site.domain.clone(), site.url.clone())).collect())
-                .unwrap_or_default(),
+            sites: status.as_ref().map(SiteItem::all).unwrap_or_default(),
+            proxies: status.as_ref().map(|s| s.proxies.iter().map(SiteItem::proxy).collect()).unwrap_or_default(),
             mail_count: status.as_ref().map_or(0, |s| s.mail_count),
             dump_count: status.as_ref().map_or(0, |s| s.dump_count),
             xdebug: status.as_ref().is_some_and(|s| s.xdebug),
             dumps: status.as_ref().is_some_and(|s| s.dumps),
         }
+    }
+}
+
+/// A site or worktree in the Sites menu: what it says, and the URL it opens.
+#[derive(Clone, PartialEq)]
+struct SiteItem {
+    label: String,
+    url: Option<String>,
+    worktrees: Vec<SiteItem>,
+}
+
+impl SiteItem {
+    /// The sites that aren't worktrees, each with its worktrees.
+    fn all(status: &Status) -> Vec<Self> {
+        status
+            .top_sites()
+            .into_iter()
+            .map(|site| SiteItem {
+                label: site.domain.clone(),
+                url: site.url.clone(),
+                worktrees: status.worktrees_of(&site.name).into_iter().map(Self::worktree).collect(),
+            })
+            .collect()
+    }
+
+    /// "softpack.test · Node.js 22.23.4": what answers at the upstream, or "· Not running".
+    fn proxy(proxy: &ProxyStatus) -> Self {
+        SiteItem { label: format!("{} · {}", proxy.domain, proxy.server_text()), url: proxy.url.clone(), worktrees: Vec::new() }
+    }
+
+    /// "feature/auth", with its own database ("· copy") and its setup ("· Composer install…").
+    fn worktree(site: &SiteStatus) -> Self {
+        let mut label = site.worktree_label();
+        if let Some(setup) = &site.worktree {
+            if !setup.database.is_empty() {
+                label.push_str(&format!(" · {}", if setup.db_mode.is_empty() { "own database" } else { setup.db_mode.as_str() }));
+            }
+            if setup.busy() || setup.failed() {
+                label.push_str(&format!(" · {}", setup.text()));
+            }
+        }
+        SiteItem { label, url: site.url.clone(), worktrees: Vec::new() }
     }
 }
 
@@ -125,17 +167,32 @@ fn toggle(text: &str, checked: bool, change: fn(bool) -> SettingsChange) -> Menu
 }
 
 impl FlockTray {
-    /// Sites, each opening in the browser.
+    /// Sites, each opening in the browser. Menus have no rows to expand, so a site with worktrees
+    /// is a submenu of the site and its worktrees: "acme.test (2)".
     fn sites(&self) -> MenuItem<Self> {
+        let open = |site: &SiteItem| match site.url.clone() {
+            Some(url) => item(&site.label, move || Command::Browse(url.clone())),
+            None => text(&site.label),
+        };
         let mut submenu: Vec<MenuItem<Self>> = self
             .state
             .sites
             .iter()
-            .map(|(domain, url)| match url.clone() {
-                Some(url) => item(domain, move || Command::Browse(url.clone())),
-                None => text(domain),
+            .map(|site| -> MenuItem<Self> {
+                if site.worktrees.is_empty() {
+                    return open(site);
+                }
+                let mut items = vec![open(site), MenuItem::Separator];
+                items.extend(site.worktrees.iter().map(open));
+                SubMenu { label: label(&counted(&site.label, site.worktrees.len() as u32)), submenu: items, ..Default::default() }.into()
             })
             .collect();
+        if !self.state.proxies.is_empty() {
+            if !submenu.is_empty() {
+                submenu.push(MenuItem::Separator);
+            }
+            submenu.extend(self.state.proxies.iter().map(open));
+        }
         if submenu.is_empty() {
             submenu.push(text("No sites yet"));
         }
@@ -285,4 +342,25 @@ fn follow(model: &Rc<AppModel>, tray: Handle<FlockTray>, shown: State) {
     // The status may have come in while the tray registered.
     update();
     model.subscribe(update);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_proxies_after_the_sites() {
+        let status: Status = serde_json::from_str(
+            r#"{"sites":[{"name":"acme","domain":"acme.test","server":"fastcgi"}],
+              "proxies":[{"name":"blog","domain":"blog.test","upstream":"http://127.0.0.1:3000","url":"http://blog.test","running":false},
+                {"name":"minio","domain":"minio.test","upstream":"http://127.0.0.1:9000","running":true}]}"#,
+        )
+        .unwrap();
+        let labels: Vec<String> = SiteItem::all(&status).into_iter().map(|s| s.label).collect();
+        assert_eq!(labels, ["acme.test"]);
+        let proxies: Vec<SiteItem> = status.proxies.iter().map(SiteItem::proxy).collect();
+        assert_eq!(proxies[0].label, "blog.test · Not running");
+        assert_eq!(proxies[0].url.as_deref(), Some("http://blog.test"));
+        assert_eq!(proxies[1].label, "minio.test · Running");
+    }
 }

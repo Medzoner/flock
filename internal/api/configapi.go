@@ -108,7 +108,9 @@ func pinSite(cfg *config.Config, site config.Site, tool, version string) error {
 		return err
 	}
 	if lifted {
-		cfg.Upsert(site)
+		if err := cfg.Upsert(site); err != nil {
+			return invalid("%v", err)
+		}
 	}
 	return nil
 }
@@ -238,7 +240,9 @@ func registerConfig(mux *http.ServeMux, b Backend) {
 			} else {
 				site.Name = config.SiteName(cmp.Or(body.Name, filepath.Base(body.Path)))
 			}
-			cfg.Upsert(site)
+			if err := cfg.Upsert(site); err != nil {
+				return invalid("%v", err)
+			}
 			return nil
 		})
 	})
@@ -306,7 +310,9 @@ func registerConfig(mux *http.ServeMux, b Backend) {
 			}
 			// A parked site becomes linked so its settings can be stored.
 			site.Parked = false
-			cfg.Upsert(site)
+			if err := cfg.Upsert(site); err != nil {
+				return invalid("%v", err)
+			}
 			return nil
 		})
 	})
@@ -329,7 +335,9 @@ func registerConfig(mux *http.ServeMux, b Backend) {
 				return invalid("%v", err)
 			}
 			site.Parked = false // a parked site becomes linked so the domain can be stored
-			cfg.Upsert(site)
+			if err := cfg.Upsert(site); err != nil {
+				return invalid("%v", err)
+			}
 			return nil
 		})
 	})
@@ -343,7 +351,9 @@ func registerConfig(mux *http.ServeMux, b Backend) {
 			if !cfg.RemoveDomain(&site, r.PathValue("domain")) {
 				return invalid("%s is not an extra domain of %s", r.PathValue("domain"), site.Name)
 			}
-			cfg.Upsert(site)
+			if err := cfg.Upsert(site); err != nil {
+				return invalid("%v", err)
+			}
 			return nil
 		})
 	})
@@ -395,8 +405,73 @@ func registerConfig(mux *http.ServeMux, b Backend) {
 
 	mux.HandleFunc("DELETE /v1/sites/{name}", func(w http.ResponseWriter, r *http.Request) {
 		mutate(w, func(cfg *config.Config) error {
+			if site, ok := cfg.FindSite(r.PathValue("name")); ok && site.IsWorktree() {
+				return fmt.Errorf("%w: %s is a git worktree of %s; it stops being served when the worktree is removed", errConflict, site.Name, site.Parent)
+			}
 			if !cfg.Remove(r.PathValue("name")) {
 				return fmt.Errorf("%w: %s is served from a parked directory; remove its parent from the project folders instead", errConflict, r.PathValue("name"))
+			}
+			return nil
+		})
+	})
+
+	// A proxy passes its name to a server of its own (see config.Proxy). Secured is kept when left out.
+	mux.HandleFunc("POST /v1/proxies", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Name     string `json:"name"`
+			Upstream string `json:"upstream"`
+			Secured  *bool  `json:"secured"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		mutate(w, func(cfg *config.Config) error {
+			upstream, err := config.NormalizeUpstream(body.Upstream)
+			if err != nil {
+				return invalid("%v", err)
+			}
+			p := config.Proxy{Name: config.SiteName(body.Name), Upstream: upstream}
+			if existing, ok := cfg.FindProxy(p.Name); ok {
+				p.Secured = existing.Secured
+			}
+			if body.Secured != nil {
+				p.Secured = *body.Secured
+			}
+			if err := cfg.UpsertProxy(p); err != nil {
+				return invalid("%v", err)
+			}
+			return nil
+		})
+	})
+
+	mux.HandleFunc("PATCH /v1/proxies/{name}", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Secured *bool `json:"secured"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		mutate(w, func(cfg *config.Config) error {
+			p, ok := cfg.FindProxy(r.PathValue("name"))
+			if !ok {
+				return invalid("no proxy named %q", r.PathValue("name"))
+			}
+			if body.Secured != nil {
+				p.Secured = *body.Secured
+			}
+			if err := cfg.UpsertProxy(p); err != nil {
+				return invalid("%v", err)
+			}
+			return nil
+		})
+	})
+
+	mux.HandleFunc("DELETE /v1/proxies/{name}", func(w http.ResponseWriter, r *http.Request) {
+		mutate(w, func(cfg *config.Config) error {
+			if !cfg.RemoveProxy(r.PathValue("name")) {
+				return invalid("no proxy named %q", r.PathValue("name"))
 			}
 			return nil
 		})
@@ -561,6 +636,32 @@ func (c *Client) SetServiceRunning(ctx context.Context, id string, on bool) ([]S
 func (c *Client) LinkSite(ctx context.Context, dir, name, domain string) (Status, error) {
 	var out Status
 	err := c.send(ctx, http.MethodPost, "/v1/sites", map[string]string{"path": dir, "name": name, "domain": domain}, &out)
+	return out, err
+}
+
+// Proxy serves <name>.<tld> from upstream (a port, host:port or URL; see config.NormalizeUpstream),
+// adding the proxy or changing its upstream. A nil secured keeps the proxy's setting (HTTP for a new one).
+func (c *Client) Proxy(ctx context.Context, name, upstream string, secured *bool) (Status, error) {
+	var out Status
+	body := map[string]any{"name": name, "upstream": upstream}
+	if secured != nil {
+		body["secured"] = *secured
+	}
+	err := c.send(ctx, http.MethodPost, "/v1/proxies", body, &out)
+	return out, err
+}
+
+// SecureProxy serves a proxy over HTTPS (on) or plain HTTP.
+func (c *Client) SecureProxy(ctx context.Context, name string, on bool) (Status, error) {
+	var out Status
+	err := c.send(ctx, http.MethodPatch, "/v1/proxies/"+url.PathEscape(name), map[string]bool{"secured": on}, &out)
+	return out, err
+}
+
+// RemoveProxy stops serving a proxy.
+func (c *Client) RemoveProxy(ctx context.Context, name string) (Status, error) {
+	var out Status
+	err := c.send(ctx, http.MethodDelete, "/v1/proxies/"+url.PathEscape(name), nil, &out)
 	return out, err
 }
 

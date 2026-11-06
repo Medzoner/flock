@@ -87,7 +87,9 @@ func newLinkCommand() *cobra.Command {
 					site.Secured = existing.Secured
 				}
 			}
-			s.cfg.Upsert(site)
+			if err := s.cfg.Upsert(site); err != nil {
+				return err
+			}
 
 			if err := s.commit(cmd.Context(), cmd.ErrOrStderr()); err != nil {
 				return err
@@ -126,6 +128,9 @@ func newUnlinkCommand() *cobra.Command {
 			site, err := siteArg(s, args)
 			if err != nil {
 				return err
+			}
+			if site.IsWorktree() {
+				return fmt.Errorf("%s is a git worktree of %s; it stops being served when you remove it with `git worktree remove`", site.Name, site.Parent)
 			}
 			if !s.cfg.Remove(site.Name) {
 				return fmt.Errorf("%s is served from a parked directory; use `flock unpark` on the parent instead", site.Name)
@@ -239,6 +244,20 @@ func newSecureCommand(on bool) *cobra.Command {
 				return err
 			}
 
+			if len(args) > 0 {
+				if p, ok := s.cfg.FindProxy(args[0]); ok {
+					p.Secured = on
+					if err := s.cfg.UpsertProxy(p); err != nil {
+						return err
+					}
+					if err := s.commit(cmd.Context(), cmd.ErrOrStderr()); err != nil {
+						return err
+					}
+					cmd.Printf("%s → %s\n", p.Name, proxyURL(s.cfg, p))
+					return nil
+				}
+			}
+
 			site, err := siteArg(s, args)
 			if err != nil {
 				return err
@@ -246,7 +265,9 @@ func newSecureCommand(on bool) *cobra.Command {
 			// Parked sites become linked so the setting can be stored.
 			site.Secured = on
 			site.Parked = false
-			s.cfg.Upsert(site)
+			if err := s.cfg.Upsert(site); err != nil {
+				return err
+			}
 
 			if err := s.commit(cmd.Context(), cmd.ErrOrStderr()); err != nil {
 				return err

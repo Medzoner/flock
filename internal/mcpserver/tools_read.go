@@ -54,7 +54,7 @@ func (s *server) addReadTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_sites",
-		Description: "Every site Flock serves, with its URL, folder and PHP version.",
+		Description: "Every site Flock serves, with its URL, folder and PHP version, and the proxies (names served by a server of their own).",
 		Annotations: readOnly,
 	}, s.listSites)
 
@@ -199,6 +199,9 @@ type siteInfo struct {
 	FrankenPHP string `json:"frankenphp_state,omitempty"`
 	Octane     bool   `json:"octane_installed,omitempty"`
 	Parked     bool   `json:"parked,omitempty"`
+	// WorktreeOf is set on a git worktree: the site whose settings it uses; Branch is its branch.
+	WorktreeOf string `json:"worktree_of,omitempty"`
+	Branch     string `json:"branch,omitempty"`
 	Problem    string `json:"problem,omitempty"`
 	Notice     string `json:"notice,omitempty"`
 }
@@ -206,7 +209,7 @@ type siteInfo struct {
 func siteInfoOf(st api.SiteStatus) siteInfo {
 	info := siteInfo{
 		Name: st.Name, URL: st.URL, Path: st.Path, HTTPS: st.Secured, Server: st.Server, Worker: st.Worker,
-		Octane: st.OctaneAvailable, Parked: st.Parked, Problem: st.Problem, Notice: st.Notice,
+		Octane: st.OctaneAvailable, Parked: st.Parked, WorktreeOf: st.Parent, Branch: st.Branch, Problem: st.Problem, Notice: st.Notice,
 		PHP:  versionInfo{Version: st.PHP, Source: st.PHPSource, File: st.PHPFile},
 		Node: versionInfo{Version: st.Node, Source: st.NodeSource, File: st.NodeFile},
 		Root: rootInfo{Path: st.Root, Source: st.RootSource, File: st.RootFile, Suggestions: st.RootSuggestions},
@@ -257,6 +260,8 @@ type siteSummary struct {
 
 type sitesOut struct {
 	Sites []siteSummary `json:"sites"`
+	// Proxies are names served by a server of their own (see proxy_site).
+	Proxies []api.ProxyStatus `json:"proxies,omitempty"`
 	// Current is the site Flock was started in, if any.
 	Current string `json:"current,omitempty"`
 }
@@ -271,6 +276,7 @@ func (s *server) listSites(ctx context.Context, _ *mcp.CallToolRequest, _ struct
 		info := siteInfoOf(site)
 		out.Sites = append(out.Sites, siteSummary{Name: info.Name, URL: info.URL, Path: info.Path, PHP: info.PHP.Version, Server: info.Server, Problem: info.Problem})
 	}
+	out.Proxies = st.Proxies
 	if current, err := s.site(ctx, ""); err == nil {
 		out.Current = current.Name
 	}

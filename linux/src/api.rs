@@ -34,6 +34,9 @@ struct ApiConfig {
 
 /// Default timeout of a request; slow endpoints pass their own.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Any request but a GET waits this long at least: a change reloads the daemon, which may start
+/// PHP, and the first start after an install can take several seconds while it is scanned.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Fetching the package manifest (the daemon gives up after 50 seconds).
 const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 /// Changing versions waits for the daemon's work, like the Go CLI (2 minutes).
@@ -261,6 +264,22 @@ impl Client {
         self.request("POST", &format!("/v1/sites/{}/restart", escape(name)), None::<&()>, Duration::from_secs(60))
     }
 
+    /// Serves <name>.test from upstream (a port, host:port or URL), adding the proxy or changing its
+    /// upstream. None for secured keeps the proxy's setting (HTTP for a new one).
+    pub fn proxy(&self, name: &str, upstream: &str, secured: Option<bool>) -> Result<Status, Error> {
+        self.request("POST", "/v1/proxies", Some(&ProxyChange::new(name, upstream, secured)), DEFAULT_TIMEOUT)
+    }
+
+    /// Serves a proxy over HTTPS (on) or plain HTTP.
+    pub fn secure_proxy(&self, name: &str, on: bool) -> Result<Status, Error> {
+        self.request("PATCH", &proxy_path(name), Some(&serde_json::json!({ "secured": on })), DEFAULT_TIMEOUT)
+    }
+
+    /// Stops serving a proxy; the server at its upstream keeps running.
+    pub fn remove_proxy(&self, name: &str) -> Result<Status, Error> {
+        self.request("DELETE", &proxy_path(name), None::<&()>, DEFAULT_TIMEOUT)
+    }
+
     pub fn add_domain(&self, site: &str, domain: &str) -> Result<Status, Error> {
         self.request(
             "POST",
@@ -373,7 +392,12 @@ impl Client {
 
     /// The last lines of a service's log.
     pub fn service_log(&self, name: &str) -> Result<String, Error> {
-        self.text(&format!("/v1/logs/services/{}?lines=2000", escape(name)))
+        self.service_log_tail(name, 2000)
+    }
+
+    /// The last `lines` lines of a service's log, such as a worktree's setup.
+    pub fn service_log_tail(&self, name: &str, lines: u32) -> Result<String, Error> {
+        self.text(&format!("/v1/logs/services/{}?lines={lines}", escape(name)))
     }
 
     /// A site's Laravel log entries, newest first.
@@ -398,6 +422,45 @@ impl Client {
 
     pub fn unregister_mcp(&self, id: &str) -> Result<Mcp, Error> {
         self.request("DELETE", &format!("/v1/mcp/clients/{}", escape(id)), None::<&()>, MCP_TIMEOUT)
+    }
+
+    /// The site's branches, for where a new worktree starts.
+    pub fn site_branches(&self, site: &str) -> Result<Branches, Error> {
+        self.request("GET", &format!("/v1/sites/{}/branches", escape(site)), None::<&()>, DEFAULT_TIMEOUT)
+    }
+
+    /// Creates a worktree of site on branch (a new branch from `from`, "" for the current commit;
+    /// a branch that exists is checked out; "" for a name Flock makes up) and starts its setup.
+    /// db is "", shared, copy or fresh.
+    pub fn create_worktree(&self, site: &str, branch: &str, from: &str, db: &str) -> Result<WorktreeCreated, Error> {
+        let body = serde_json::json!({ "site": site, "branch": branch, "from": from, "db": db });
+        self.request("POST", "/v1/worktrees", Some(&body), CHANGE_TIMEOUT)
+    }
+
+    /// Sets a worktree up, or joins the setup that runs; again sets up one that is set up already.
+    pub fn setup_worktree(&self, path: &str, again: bool) -> Result<WorktreeStatus, Error> {
+        let body = serde_json::json!({ "path": path, "again": again });
+        self.request("POST", "/v1/worktrees/setup", Some(&body), DEFAULT_TIMEOUT)
+    }
+
+    /// The setup of the worktree at path: its state, step and log.
+    pub fn worktree_setup(&self, path: &str) -> Result<WorktreeStatus, Error> {
+        self.request("GET", &format!("/v1/worktrees/setup?path={}", escape(path)), None::<&()>, DEFAULT_TIMEOUT)
+    }
+
+    /// Gives a worktree the site's database (shared) or one of its own (copy, fresh), as its job.
+    /// The database Flock made for it before is dropped.
+    pub fn switch_worktree_database(&self, path: &str, db: &str) -> Result<WorktreeStatus, Error> {
+        let body = serde_json::json!({ "path": path, "db": db });
+        self.request("POST", "/v1/worktrees/db", Some(&body), DEFAULT_TIMEOUT)
+    }
+
+    /// Runs the worktree's before_delete hook, removes it with git and drops the database Flock
+    /// made for it. Answers with what the hook and git printed. force removes it despite changes
+    /// or a failing hook.
+    pub fn remove_worktree(&self, path: &str, force: bool) -> Result<String, Error> {
+        let body = serde_json::json!({ "path": path, "force": force });
+        self.request::<_, WorktreeRemoval>("POST", "/v1/worktrees/remove", Some(&body), INSTALL_TIMEOUT).map(|r| r.output)
     }
 
     /// Serves every folder in path as a site (`flock park`).
@@ -429,6 +492,7 @@ impl Client {
     fn send<B: Serialize>(&self, method: &str, path: &str, body: Option<&B>, timeout: Duration) -> Result<Vec<u8>, Error> {
         let data = std::fs::read(paths::api_json()).map_err(|_| Error::NotRunning)?;
         let config: ApiConfig = serde_json::from_slice(&data).map_err(|_| Error::NotRunning)?;
+        let timeout = if method == "GET" { timeout } else { timeout.max(WRITE_TIMEOUT) };
         let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(timeout)).build().into();
         let url = format!("{}{}", config.url.trim_end_matches('/'), path);
         let auth = format!("Bearer {}", config.token);
@@ -462,6 +526,25 @@ impl Client {
             return Err(Error::Server { status, message });
         }
         Ok(bytes)
+    }
+}
+
+fn proxy_path(name: &str) -> String {
+    format!("/v1/proxies/{}", escape(name))
+}
+
+/// POST /v1/proxies: secured is left out to keep an existing proxy's setting.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct ProxyChange {
+    pub name: String,
+    pub upstream: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secured: Option<bool>,
+}
+
+impl ProxyChange {
+    pub fn new(name: &str, upstream: &str, secured: Option<bool>) -> Self {
+        Self { name: name.to_owned(), upstream: upstream.to_owned(), secured }
     }
 }
 
@@ -508,6 +591,9 @@ pub struct Status {
     pub xdebug: bool,
     pub xdebug_breakpoints: bool,
     pub sites: Vec<SiteStatus>,
+    /// Names served by a server of their own, e.g. a dev server on a port (`flock proxy`); an
+    /// older daemon sends none.
+    pub proxies: Vec<ProxyStatus>,
     pub processes: Vec<ProcStatus>,
     pub warnings: Vec<String>,
     pub channel: String,
@@ -990,6 +1076,12 @@ pub struct SiteStatus {
     pub node_shadowed: String,
     pub secured: bool,
     pub parked: bool,
+    /// Set on a git worktree of another site: that site's name, whose settings it uses. branch is
+    /// the worktree's branch ("" when HEAD is detached).
+    pub parent: String,
+    pub branch: String,
+    /// The setup of a worktree Flock set up (None for others).
+    pub worktree: Option<WorktreeStatus>,
     pub url: Option<String>,
     pub problem: Option<String>,
     pub notice: Option<String>,
@@ -1031,6 +1123,24 @@ impl SiteStatus {
         !self.root_pinned.is_empty()
     }
 
+    pub fn is_worktree(&self) -> bool {
+        !self.parent.is_empty()
+    }
+
+    /// What a worktree is listed as: its branch, or the name it is served under ("feature-auth" of
+    /// feature-auth.acme) when HEAD is detached.
+    pub fn worktree_label(&self) -> String {
+        if !self.branch.is_empty() {
+            return self.branch.clone();
+        }
+        self.name.split('.').next().unwrap_or(&self.name).to_owned()
+    }
+
+    /// The database Flock made for the worktree, if it has one of its own.
+    pub fn own_database(&self) -> Option<&str> {
+        self.worktree.as_ref().map(|w| w.database.as_str()).filter(|d| !d.is_empty())
+    }
+
     /// FrankenPHP runs PHP 8.2 and newer; a version that can't be read doesn't block it.
     pub fn supports_frankenphp(&self) -> bool {
         let mut parts = self.php.split('.').map(|p| p.parse::<u32>());
@@ -1038,6 +1148,19 @@ impl SiteStatus {
             (Some(Ok(major)), Some(Ok(minor))) => (major, minor) >= (8, 2),
             _ => true,
         }
+    }
+}
+
+impl Status {
+    /// The sites the lists show at the top: those that aren't worktrees, and worktrees whose site
+    /// isn't served (any more).
+    pub fn top_sites(&self) -> Vec<&SiteStatus> {
+        self.sites.iter().filter(|s| !s.is_worktree() || !self.sites.iter().any(|p| p.name == s.parent)).collect()
+    }
+
+    /// The worktrees of a site.
+    pub fn worktrees_of(&self, name: &str) -> Vec<&SiteStatus> {
+        self.sites.iter().filter(|s| s.parent == name).collect()
     }
 }
 
@@ -1066,6 +1189,150 @@ pub struct SiteFrankenPhp {
     pub progress: f64,
     pub problem: String,
     pub log: String,
+}
+
+/// A name served by a server of its own rather than by PHP, e.g. a Node.js dev server: every
+/// request, WebSocket upgrades included, passes to upstream with its Host header.
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct ProxyStatus {
+    pub name: String,
+    pub domain: String,
+    /// Where requests go, e.g. http://127.0.0.1:3000.
+    pub upstream: String,
+    pub secured: bool,
+    pub url: Option<String>,
+    /// Why it isn't served, e.g. a site of the same name serves its domain.
+    pub problem: Option<String>,
+    /// Something answers at the upstream; server names it when it runs on this machine, e.g.
+    /// "Node.js 22.23.4" for one of Flock's Node.js versions.
+    pub running: bool,
+    pub server: Option<String>,
+}
+
+impl ProxyStatus {
+    /// The upstream without the http:// Flock adds: "127.0.0.1:3000".
+    pub fn upstream_label(&self) -> &str {
+        self.upstream.strip_prefix("http://").unwrap_or(&self.upstream)
+    }
+
+    /// What answers at the upstream: "Node.js 22.23.4", "Running" or "Not running".
+    pub fn server_text(&self) -> String {
+        match (&self.server, self.running) {
+            (_, false) => "Not running".to_owned(),
+            (Some(server), true) if !server.is_empty() => server.clone(),
+            _ => "Running".to_owned(),
+        }
+    }
+}
+
+/// The setup of a git worktree (worktree.Status).
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct WorktreeStatus {
+    /// queued, running, ready or failed.
+    pub state: String,
+    /// What a running setup does now, e.g. "composer install".
+    pub step: String,
+    pub error: String,
+    /// The setup's log, for /v1/logs/services/{log}.
+    pub log: String,
+    /// The database mode asked for: shared, copy, fresh, or "" for the project's.
+    pub db_mode: String,
+    /// The worktree's own database, "" when it uses the site's.
+    pub database: String,
+}
+
+impl WorktreeStatus {
+    /// Queued or running: the setup, or a switch of the database.
+    pub fn busy(&self) -> bool {
+        self.state == "queued" || self.state == "running"
+    }
+
+    pub fn failed(&self) -> bool {
+        self.state == "failed"
+    }
+
+    /// "Waiting…", "composer install…", "Ready" or "Setup failed".
+    pub fn text(&self) -> String {
+        match self.state.as_str() {
+            "queued" => "Waiting…".to_owned(),
+            "running" => self.step_text(),
+            "failed" => "Setup failed".to_owned(),
+            _ => "Ready".to_owned(),
+        }
+    }
+
+    /// What a running setup does: "Composer install…", or "Setting up…" between steps.
+    pub fn step_text(&self) -> String {
+        if self.step.is_empty() { "Setting up…".to_owned() } else { format!("{}…", capitalized(&self.step)) }
+    }
+}
+
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+/// POST /v1/worktrees (api.WorktreeCreated).
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct WorktreeCreated {
+    pub path: String,
+    /// The branch it is on: the one asked for, or the name Flock made up.
+    pub branch: String,
+    pub setup: WorktreeStatus,
+}
+
+/// GET /v1/sites/{name}/branches (api.Branches): current is "" when HEAD is detached; default is
+/// origin's HEAD, else main or master, else "".
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct Branches {
+    pub current: String,
+    pub default: String,
+    pub local: Option<Vec<String>>,
+    pub remote: Option<Vec<String>>,
+}
+
+impl Branches {
+    pub fn has_local(&self, name: &str) -> bool {
+        self.local.iter().flatten().any(|b| b == name)
+    }
+
+    /// Where a new branch can start, as value and label: the current commit when HEAD is
+    /// detached, the current branch, the default one, the other local ones, then origin's.
+    pub fn choices(&self) -> Vec<(String, String)> {
+        let mut choices = Vec::new();
+        if self.current.is_empty() {
+            choices.push((String::new(), "The current commit".to_owned()));
+        }
+        let mut names: Vec<&String> = Vec::new();
+        for name in [&self.current, &self.default].into_iter().chain(self.local.iter().flatten()) {
+            if !name.is_empty() && self.has_local(name) && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        for name in names {
+            let label = if *name == self.current {
+                format!("{name} (current)")
+            } else if *name == self.default {
+                format!("{name} (default)")
+            } else {
+                name.clone()
+            };
+            choices.push((name.clone(), label));
+        }
+        choices.extend(self.remote.iter().flatten().map(|r| (r.clone(), r.clone())));
+        choices
+    }
+}
+
+/// POST /v1/worktrees/remove (api.WorktreeRemoval).
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+struct WorktreeRemoval {
+    output: String,
 }
 
 /// A site's share (`flock share`).
@@ -1142,6 +1409,96 @@ mod tests {
         assert_eq!(status.sites[0].url.as_deref(), Some("https://acme.test"));
         assert!(!status.sites[0].shared());
         assert!(!status.is_degraded());
+    }
+
+    // A site with two worktrees: one set up with a database of its own, one Flock didn't set up.
+    #[test]
+    fn decodes_worktrees() {
+        let json = r#"{"sites":[
+            {"name":"acme","domain":"acme.test","path":"/home/a/acme","secured":true},
+            {"name":"feature-auth.acme","domain":"feature-auth.acme.test","path":"/home/a/acme-feature-auth",
+              "parent":"acme","branch":"feature/auth","url":"https://feature-auth.acme.test",
+              "worktree":{"state":"running","step":"composer install","log":"worktree-feature-auth.acme",
+                "db_mode":"copy","database":"acme_feature_auth"}},
+            {"name":"old.acme","domain":"old.acme.test","path":"/home/a/acme-old","parent":"acme","worktree":null}]}"#;
+        let status: Status = serde_json::from_str(json).unwrap();
+        assert_eq!(status.top_sites().len(), 1);
+        let worktrees = status.worktrees_of("acme");
+        assert_eq!(worktrees.len(), 2);
+        let auth = worktrees[0];
+        assert!(auth.is_worktree());
+        assert_eq!(auth.worktree_label(), "feature/auth");
+        assert_eq!(auth.own_database(), Some("acme_feature_auth"));
+        let setup = auth.worktree.as_ref().unwrap();
+        assert!(setup.busy());
+        assert_eq!(setup.text(), "Composer install…");
+        assert_eq!(setup.log, "worktree-feature-auth.acme");
+        // Detached, and not set up by Flock.
+        assert_eq!(worktrees[1].worktree_label(), "old");
+        assert_eq!(worktrees[1].worktree, None);
+        assert_eq!(worktrees[1].own_database(), None);
+        // An older daemon's site.
+        assert!(!status.sites[0].is_worktree());
+        assert!(status.worktrees_of("old.acme").is_empty());
+    }
+
+    #[test]
+    fn decodes_proxies() {
+        let json = r#"{"proxies":[
+            {"name":"softpack","domain":"softpack.test","upstream":"http://127.0.0.1:3000","secured":true,
+              "url":"https://softpack.test","running":true,"server":"Node.js 22.23.4"},
+            {"name":"blog","domain":"blog.test","upstream":"https://127.0.0.1:8443","secured":false,
+              "problem":"blog.test is served by a site of the same name","running":false}]}"#;
+        let status: Status = serde_json::from_str(json).unwrap();
+        let names: Vec<&str> = status.proxies.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["softpack", "blog"]);
+        let softpack = &status.proxies[0];
+        assert!(softpack.secured && softpack.running && softpack.problem.is_none());
+        assert_eq!(softpack.url.as_deref(), Some("https://softpack.test"));
+        assert_eq!(softpack.upstream_label(), "127.0.0.1:3000");
+        assert_eq!(softpack.server_text(), "Node.js 22.23.4");
+        let blog = &status.proxies[1];
+        assert!(blog.url.is_none() && blog.problem.is_some() && !blog.running && blog.server.is_none());
+        assert_eq!(blog.upstream_label(), "https://127.0.0.1:8443");
+        assert_eq!(blog.server_text(), "Not running");
+        let unnamed = ProxyStatus { running: true, ..Default::default() };
+        assert_eq!(unnamed.server_text(), "Running");
+        // An older daemon sends none.
+        assert!(serde_json::from_str::<Status>(r#"{"version":"1.4.0"}"#).unwrap().proxies.is_empty());
+    }
+
+    #[test]
+    fn shapes_the_proxy_requests() {
+        // A new proxy leaves secured out, so the daemon keeps an existing one's setting.
+        let added = serde_json::to_value(ProxyChange::new("softpack", "3000", None)).unwrap();
+        assert_eq!(added, serde_json::json!({ "name": "softpack", "upstream": "3000" }));
+        let secured = serde_json::to_value(ProxyChange::new("softpack", "3001", Some(true))).unwrap();
+        assert_eq!(secured, serde_json::json!({ "name": "softpack", "upstream": "3001", "secured": true }));
+        assert_eq!(proxy_path("soft pack"), "/v1/proxies/soft%20pack");
+    }
+
+    #[test]
+    fn decodes_a_created_worktree() {
+        let json = r#"{"path":"/home/a/acme-brave-otter","branch":"brave-otter","setup":{"state":"queued","log":"worktree-x.acme"}}"#;
+        let created: WorktreeCreated = serde_json::from_str(json).unwrap();
+        assert_eq!(created.branch, "brave-otter");
+        assert_eq!(created.setup.text(), "Waiting…");
+    }
+
+    #[test]
+    fn orders_the_branches_to_start_from() {
+        let json = r#"{"current":"develop","default":"main","local":["develop","feature/x","main"],
+            "remote":["origin/develop","origin/main"]}"#;
+        let branches: Branches = serde_json::from_str(json).unwrap();
+        assert!(branches.has_local("feature/x"));
+        assert!(!branches.has_local("origin/main"));
+        let labels: Vec<String> = branches.choices().into_iter().map(|(_, label)| label).collect();
+        assert_eq!(labels, ["develop (current)", "main (default)", "feature/x", "origin/develop", "origin/main"]);
+        assert_eq!(branches.choices()[1].0, "main");
+        // Detached, or a daemon without branches: only the current commit.
+        let detached: Branches = serde_json::from_str(r#"{"current":"","default":"","local":null,"remote":null}"#).unwrap();
+        assert_eq!(detached.choices(), [(String::new(), "The current commit".to_owned())]);
+        assert_eq!(Branches::default().choices().len(), 1);
     }
 
     #[test]

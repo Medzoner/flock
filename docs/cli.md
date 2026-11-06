@@ -28,12 +28,21 @@ This page lists the `flock` commands. The other pages show where to find each ac
 | `flock unpark [dir]` | Stop serving a parked directory (alias: `forget`) |
 | `flock link [name] [--php 8.4] [--secure] [--domain <domain>]` | Serve the current directory as `<name>.test`, or as `--domain` |
 | `flock unlink [name]` | Remove a linked site |
-| `flock sites` | List linked and parked sites |
-| `flock secure [name]` | Serve a site over HTTPS with a trusted certificate |
-| `flock unsecure [name]` | Serve a site over plain HTTP |
+| `flock sites` | List linked and parked sites, and proxies |
+| `flock proxy <name> <port\|host:port\|url> [--secure]` | Proxy `<name>.test` to a local service, e.g. a Node.js dev server |
+| `flock unproxy <name>` | Stop serving a proxy |
+| `flock proxies` | List proxies |
+| `flock secure [name]` | Serve a site or proxy over HTTPS with a trusted certificate |
+| `flock unsecure [name]` | Serve a site or proxy over plain HTTP |
 | `flock domain add <domain> [site]` | Add a subdomain or alias to a site (`flock domains` works too) |
 | `flock domain remove <domain> [site]` | Remove an extra domain (alias: `rm`) |
 | `flock domain list [site]` | List a site's extra domains (alias: `ls`) |
+| `flock worktree add [branch] [--from <ref>] [--path <dir>] [--db <mode>]` | Create a git worktree of the current site on a branch (without one, Flock picks a name) and set it up |
+| `flock worktree setup [path] [--again] [--db <mode>]` | Set a worktree up, or follow the setup that runs |
+| `flock worktree list [--site <name>]` | List the git worktrees Flock serves, of every site or of one |
+| `flock worktree open [name]` | Open a worktree in the browser (the one you're in, by default) |
+| `flock worktree db <shared\|copy\|fresh> [name]` | Switch a worktree's database |
+| `flock worktree remove [name] [--force]` | Run a worktree's `before_delete` hook, remove it with git and drop its own database (alias: `rm`) |
 | `flock share [name] [--allow <email>] [--debug]` | Share a site at a temporary public URL until you press <kbd>Ctrl</kbd>+<kbd>C</kbd> |
 | `flock share [name] --stop` | Stop sharing a site (e.g. one shared from the app) |
 
@@ -66,7 +75,7 @@ This page lists the `flock` commands. The other pages show where to find each ac
 
 | Command | Description |
 | --- | --- |
-| `flock services` | List services and their state |
+| `flock services [--json]` | List services and their state; `--json` for scripts: each with its port, whether it runs, and the `.env` settings to connect to it |
 | `flock services install <service> [version] [--port N]` | Install PostgreSQL, MySQL, MariaDB, MongoDB, Valkey, Redis (macOS), Meilisearch, Typesense (macOS and Linux) or RustFS. `--port` doesn't apply to PostgreSQL |
 | `flock services uninstall <service> [version] [--delete-data]` | Remove a version of a service (the active one unless given) |
 | `flock services use <service> <version>` | Switch a service to another installed version |

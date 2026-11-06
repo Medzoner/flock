@@ -38,6 +38,7 @@ import (
 	"flock/internal/share"
 	"flock/internal/supervisor"
 	"flock/internal/web"
+	"flock/internal/worktree"
 	"flock/internal/xdebug"
 )
 
@@ -83,6 +84,12 @@ type daemon struct {
 	catalog *catalog.Manager
 	// shares are the sites shared through tunnels (`flock share`); never kept across restarts.
 	shares *share.Manager
+	// worktrees sets up the sites' git worktrees (see syncWorktrees); pendingDB are the database
+	// modes asked for while their setup ran, by path (see setPendingDB).
+	worktrees *worktree.Manager
+	pendingMu sync.Mutex
+	pendingDB map[string]string
+	gone      map[string]bool // worktrees being forgotten, by path (see syncWorktrees)
 
 	// leaves issues certificates for deep subdomains, aliases and unknown names during handshakes.
 	leaves *certs.Leaves
@@ -91,6 +98,8 @@ type daemon struct {
 
 	mu       sync.Mutex
 	sites    []api.SiteStatus
+	proxies  []api.ProxyStatus
+	probe    serverProbe // what answers at the proxies' upstreams
 	warnings []string
 	problems map[string]string // why an installed catalog service isn't running, by id
 	// breakpoints finds PhpStorm breakpoints; breakpointSites is what the last reload found, by site path.
@@ -106,6 +115,9 @@ func (d *daemon) shutdown() {
 	// First, while reloads still work: stopping a share reloads the web server.
 	if d.shares != nil {
 		d.shares.StopAll()
+	}
+	if d.worktrees != nil {
+		d.worktrees.StopAll()
 	}
 	d.reloadMu.Lock()
 	defer d.reloadMu.Unlock()
@@ -288,6 +300,7 @@ func Run(ctx context.Context, cfg Config) error {
 	go d.frankenphp.Run(ctx)
 	d.catalog = catalog.NewManager(cfg.Root, catalog.Kinds(runtime.GOOS), d.binaries, d.Mutate)
 	go d.catalog.Run(ctx)
+	d.worktrees = worktree.NewManager(cfg.Root)
 	d.shares = share.NewManager(cfg.Root, d.binaries)
 	d.shares.Changed = func() {
 		if err := d.reload(); err != nil {
@@ -300,6 +313,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := d.reload(); err != nil {
 		d.setWarnings([]string{err.Error()})
 	}
+	d.markWorktreesSince()
 	// What the first reload served, taken before the API answers: a folder parked once a client
 	// can see the daemon is a change.
 	files, extFiles := d.projectFiles(), d.postgresExtensionFiles()
@@ -541,15 +555,21 @@ func (d *daemon) reload() error {
 		breakpoints = map[string]bool{}     // site path → PhpStorm breakpoints found
 	)
 
-	// ensurePool starts a pool and waits for it to listen: Caddy would answer 502 until it does.
+	// ensurePool starts a pool. The pools that (re)started are waited for together before Caddy
+	// gets the new config: it would answer 502 until they listen.
+	type startedPool struct {
+		upstreams []string
+		log       string
+	}
+	var started []startedPool
 	ensurePool := func(pool php.Pool, log string) {
 		restarted := false
 		for _, spec := range pool.Specs {
 			restarted = d.procs.Ensure(spec) || restarted
 			keep[spec.Name] = true
 		}
-		if restarted && !php.WaitReady(pool.Upstreams, 5*time.Second) {
-			warnings = append(warnings, fmt.Sprintf("php: %s did not start — see `flock logs %s`", log, log))
+		if restarted {
+			started = append(started, startedPool{pool.Upstreams, log})
 		}
 	}
 
@@ -603,6 +623,7 @@ func (d *daemon) reload() error {
 		version := phpVersion.Version
 		status := api.SiteStatus{
 			Name: site.Name, Domain: domain, Path: site.Path, Secured: site.Secured, Parked: site.Parked,
+			Parent: site.Parent, Branch: site.Branch,
 			PHP: version, PHPSource: phpVersion.Source, PHPPinned: phpVersion.Pinned, PHPFile: phpVersion.File,
 			Node: nodeVersion.Version, NodeSource: nodeVersion.Source, NodePinned: nodeVersion.Pinned, NodeFile: nodeVersion.File,
 			NodeShadowed: nodeVersion.Shadowed, Domains: []api.SiteDomain{},
@@ -712,6 +733,36 @@ func (d *daemon) reload() error {
 		statuses = append(statuses, status)
 	}
 
+	// Proxied names pass every request to their own server. A site's name wins over a proxy's: they
+	// can only clash through a parked directory or a config edited by hand.
+	taken := map[string]bool{}
+	for _, name := range domains {
+		taken[name] = true
+	}
+	var proxies []api.ProxyStatus
+	for _, p := range cfg.Proxies {
+		domain := cfg.ProxyDomain(p)
+		status := api.ProxyStatus{Name: p.Name, Domain: domain, Upstream: p.Upstream, Secured: p.Secured}
+		if taken[domain] {
+			status.Problem = domain + " is served by a site of the same name"
+			proxies = append(proxies, status)
+			continue
+		}
+		ws := web.Site{Domain: domain, Proxy: p.Upstream}
+		scheme := "http"
+		if p.Secured {
+			scheme = "https"
+			if ws.CertFile, ws.KeyFile, err = ca.SiteCert(domain); err != nil {
+				return fmt.Errorf("certificate for %s: %w", domain, err)
+			}
+		}
+		status.URL = scheme + "://" + domain + portSuffix(scheme, cfg)
+		taken[domain] = true
+		webSites = append(webSites, ws)
+		domains = append(domains, domain)
+		proxies = append(proxies, status)
+	}
+
 	// Shares always go through the version's normal FastCGI pool, also for FrankenPHP sites: only
 	// FastCGI takes the per-request settings that keep a share safe (see web.Share).
 	var shares []web.Share
@@ -802,6 +853,20 @@ func (d *daemon) reload() error {
 
 	d.procs.Retain(keep)
 
+	// The pools that started, waited for together: a cold start (an antivirus scanning PHP the
+	// first time) shouldn't add up per pool.
+	ready := make([]bool, len(started))
+	var wg sync.WaitGroup
+	for i, pool := range started {
+		wg.Go(func() { ready[i] = php.WaitReady(pool.upstreams, 5*time.Second) })
+	}
+	wg.Wait()
+	for i, pool := range started {
+		if !ready[i] {
+			warnings = append(warnings, fmt.Sprintf("php: %s did not start — see `flock logs %s`", pool.log, pool.log))
+		}
+	}
+
 	bind := "127.0.0.1"
 	if runtime.GOOS == "darwin" && (cfg.Ports.HTTP < 1024 || cfg.Ports.HTTPS < 1024) {
 		bind = ""
@@ -812,10 +877,11 @@ func (d *daemon) reload() error {
 	}
 
 	d.mu.Lock()
-	d.cfg, d.sites, d.warnings, d.problems, d.breakpointSites = cfg, statuses, warnings, problems, breakpoints
+	d.cfg, d.sites, d.proxies, d.warnings, d.problems, d.breakpointSites = cfg, statuses, proxies, warnings, problems, breakpoints
 	d.mu.Unlock()
 
 	go d.checkWildcard()
+	d.syncWorktrees(cfg)
 	// Until there are defaults: one may be installed now (the first run's, or one the user installed).
 	if cfg.DefaultPHP == "" || cfg.DefaultNode == "" {
 		go d.ensureDefaults()
@@ -966,6 +1032,12 @@ func (s pgService) Reload() error { return s.d.reload() }
 
 // Status implements api.Backend.
 func (d *daemon) Status() api.Status {
+	// Probed outside the lock: a dev server that doesn't answer takes a moment to say so.
+	d.mu.Lock()
+	served := d.proxies
+	d.mu.Unlock()
+	proxies := d.probe.live(d.root, served)
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -973,7 +1045,8 @@ func (d *daemon) Status() api.Status {
 		Version:   d.version,
 		PID:       os.Getpid(),
 		StartedAt: d.startedAt,
-		Sites:     d.withShares(withBoost(d.liveSites())),
+		Sites:     d.withWorktrees(d.withShares(withBoost(d.liveSites()))),
+		Proxies:   proxies,
 		Processes: d.procs.Status(),
 		Warnings:  d.warnings,
 	}

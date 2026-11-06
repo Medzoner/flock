@@ -1,5 +1,5 @@
 # Builds Flock-Setup-x64.exe into windows\dist\: the flock CLI, hosts helper and daemon launcher, the tray app
-# (via build.ps1, which also runs the FlockKit tests) and the Inno Setup installer around them.
+# (via build.ps1, which also runs the Flock.Kit tests) and the Inno Setup installer around them.
 #
 #   .\windows\build-installer.ps1
 #
@@ -37,7 +37,7 @@ finally {
     Pop-Location
 }
 
-# Signed when build.yml set up signing (sign.ps1), like the tray app (build.ps1) and the installer.
+# Signed when ci-build.yml sets up signing (sign.ps1), like the tray app (build.ps1) and the installer.
 $sign = Join-Path $PSScriptRoot "sign.ps1"
 & $sign "$out\flock.exe" "$out\flock-helper.exe" "$out\flockd.exe"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
