@@ -233,6 +233,31 @@ func TestShareHandlerRewritesOnlyPagesWhileTheDevServerRuns(t *testing.T) {
 	}
 }
 
+func TestShareHandlerWritesRewrittenPagesAfterTheInnerHandlerReturns(t *testing.T) {
+	public := viteProject(t, "http://localhost:5173")
+	h := shareHandler{Public: public}
+	rec := httptest.NewRecorder()
+	page := `<script type="module" src="http://localhost:5173/resources/js/app.js"></script>`
+
+	err := h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil), caddyhttp.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) error {
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.WriteHeader(http.StatusOK)
+		if _, err := io.WriteString(w, page); err != nil {
+			return err
+		}
+		if rec.Body.Len() != 0 {
+			t.Fatalf("rewritten response was written before the inner handler returned: %q", rec.Body.String())
+		}
+		return nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); !strings.Contains(got, "/build/assets/app-1a2b.js") {
+		t.Fatalf("page not rewritten after the inner handler returned: %q", got)
+	}
+}
+
 func asHandlerError(err error, target *caddyhttp.HandlerError) bool {
 	he, ok := err.(caddyhttp.HandlerError)
 	if ok {

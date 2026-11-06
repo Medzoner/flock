@@ -1,7 +1,7 @@
 package web
 
 import (
-	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"mime"
@@ -187,17 +187,16 @@ func blockedSharePath(p string) bool {
 	return false
 }
 
-// rewriteWriter passes a response through, except a page while the dev server runs: that goes
-// through viteAssets.rewriteHTML on its way out, streamed (not buffered) so streamed pages still
-// stream.
+// rewriteWriter passes a response through, except an HTML page while the dev server runs. Those
+// pages are buffered until the handler returns, then viteAssets.rewriteHTML rewrites them.
 type rewriteWriter struct {
 	*caddyhttp.ResponseWriterWrapper
-	assets *viteAssets
-	head   bool
+	assets   *viteAssets
+	head     bool
+	buffer   bytes.Buffer
+	recorder caddyhttp.ResponseRecorder
 
 	wroteHeader bool
-	chunks      chan []byte // to the rewriting goroutine, when rewriting
-	done        chan struct{}
 }
 
 // rewrites reports whether a response is a page to rewrite: a complete, uncompressed HTML 200.
@@ -217,9 +216,10 @@ func (w *rewriteWriter) WriteHeader(status int) {
 	if !w.head && rewrites(status, w.Header()) {
 		w.Header().Del("Content-Length")
 		w.Header().Del("ETag")
-		w.chunks, w.done = make(chan []byte, 16), make(chan struct{})
-		w.ResponseWriter.WriteHeader(status)
-		go w.rewrite()
+		w.recorder = caddyhttp.NewResponseRecorder(w.ResponseWriter, &w.buffer, func(int, http.Header) bool {
+			return true
+		})
+		w.recorder.WriteHeader(status)
 		return
 	}
 	if rewrites(status, w.Header()) {
@@ -232,11 +232,10 @@ func (w *rewriteWriter) Write(p []byte) (int, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
-	if w.chunks == nil {
-		return w.ResponseWriter.Write(p)
+	if w.recorder != nil {
+		return w.recorder.Write(p)
 	}
-	w.chunks <- append([]byte(nil), p...)
-	return len(p), nil
+	return w.ResponseWriter.Write(p)
 }
 
 // ReadFrom keeps io.Copy (which the FastCGI proxy uses) from writing past the rewrite.
@@ -244,79 +243,19 @@ func (w *rewriteWriter) ReadFrom(r io.Reader) (int64, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
-	if w.chunks == nil {
-		return io.Copy(w.ResponseWriter, r)
+	if w.recorder != nil {
+		return io.Copy(w.recorder, r)
 	}
-	return io.Copy(writerOnly{w}, r)
-}
-
-// writerOnly hides ReadFrom, so io.Copy goes through Write.
-type writerOnly struct{ io.Writer }
-
-// Flush is left to the rewriting goroutine while it runs: it flushes whenever it has caught up.
-func (w *rewriteWriter) Flush() {
-	if w.chunks == nil {
-		_ = http.NewResponseController(w.ResponseWriter).Flush()
-	}
+	return io.Copy(w.ResponseWriter, r)
 }
 
 func (w *rewriteWriter) finish() {
-	if w.chunks != nil {
-		close(w.chunks)
-		<-w.done
+	if w.recorder != nil {
+		w.ResponseWriter.WriteHeader(w.recorder.Status())
+		_ = w.assets.rewriteHTML(w.ResponseWriter, w.recorder.Buffer())
 	}
-}
-
-func (w *rewriteWriter) rewrite() {
-	defer close(w.done)
-	// Tokens are small; buffered, the first write is big enough for encode to compress the page.
-	out := bufio.NewWriterSize(w.ResponseWriter, 32<<10)
-	flush := func() {
-		if out.Flush() == nil {
-			_ = http.NewResponseController(w.ResponseWriter).Flush()
-		}
-	}
-	r := &chunkReader{chunks: w.chunks, idle: flush}
-	defer func() {
-		// Whatever happens, drain the handler's writes so it never blocks.
-		for range w.chunks {
-		}
-	}()
-	_ = w.assets.rewriteHTML(out, r)
-	_ = out.Flush()
-}
-
-// chunkReader reads the chunks a handler writes, calling idle before it waits for more.
-type chunkReader struct {
-	chunks <-chan []byte
-	idle   func()
-	cur    []byte
-}
-
-func (r *chunkReader) Read(p []byte) (int, error) {
-	for len(r.cur) == 0 {
-		select {
-		case c, ok := <-r.chunks:
-			if !ok {
-				return 0, io.EOF
-			}
-			r.cur = c
-			continue
-		default:
-		}
-		r.idle()
-		c, ok := <-r.chunks
-		if !ok {
-			return 0, io.EOF
-		}
-		r.cur = c
-	}
-	n := copy(p, r.cur)
-	r.cur = r.cur[n:]
-	return n, nil
 }
 
 var (
 	_ caddyhttp.MiddlewareHandler = (*shareHandler)(nil)
-	_ http.Flusher                = (*rewriteWriter)(nil)
 )
