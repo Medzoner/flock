@@ -358,21 +358,31 @@ func TestFoldersInParkedPathsAreFollowed(t *testing.T) {
 	waitFor(false)
 }
 
-func TestProjectFilesFollowsCustomCaddyfile(t *testing.T) {
+func TestProjectFilesFollowsRootOrConfiguredCaddyfile(t *testing.T) {
 	site := t.TempDir()
 	d := daemon{cfg: &config.Config{Sites: []config.Site{{Name: "app", Path: site}}}}
 	before := d.projectFiles()
 
-	file := filepath.Join(site, ".flock", "Caddyfile")
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	file := filepath.Join(site, "Caddyfile")
 	if err := os.WriteFile(file, []byte("header X-Test yes\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	after := d.projectFiles()
 	if before == after || !strings.Contains(after, file) {
 		t.Fatalf("custom Caddyfile did not change the project fingerprint: before %q, after %q", before, after)
+	}
+
+	configured := filepath.Join(site, "ops", "local.Caddyfile")
+	if err := os.MkdirAll(filepath.Dir(configured), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configured, []byte("header X-Configured yes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(site, ".env"), "FLOCK_CADDYFILE='ops/local.Caddyfile'\n")
+	overridden := d.projectFiles()
+	if overridden == after || !strings.Contains(overridden, configured) || strings.Contains(overridden, file+" ") {
+		t.Fatalf("FLOCK_CADDYFILE did not select the configured file: %q", overridden)
 	}
 }
 

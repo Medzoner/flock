@@ -451,9 +451,18 @@ func (d *daemon) projectFiles() string {
 	return b.String()
 }
 
-// caddyfile returns a site's optional project-specific Caddy directives file.
+// caddyfile returns a site's optional project-specific Caddy directives file. It is Caddyfile in
+// the project by default; FLOCK_CADDYFILE in .env may name another file, relative to the project.
 func caddyfile(project string) string {
-	file := filepath.Join(project, ".flock", "Caddyfile")
+	file := filepath.Join(project, "Caddyfile")
+	if env, err := worktree.ReadDotenv(filepath.Join(project, ".env")); err == nil {
+		if configured := env.Get("FLOCK_CADDYFILE"); configured != "" {
+			file = configured
+			if !filepath.IsAbs(file) {
+				file = filepath.Join(project, file)
+			}
+		}
+	}
 	if info, err := os.Stat(file); err == nil && !info.IsDir() {
 		return file
 	}

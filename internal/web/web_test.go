@@ -52,7 +52,7 @@ func TestCaddyfileRoutesSitesAndSubdomains(t *testing.T) {
 
 func TestCaddyfileIncludesSiteHandlersFromBracketedProjectPath(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "app [local]")
-	file := filepath.Join(dir, ".flock", "Caddyfile")
+	file := filepath.Join(dir, "Caddyfile")
 	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		t.Fatal(err)
 	}
