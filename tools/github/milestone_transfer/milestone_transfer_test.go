@@ -63,5 +63,5 @@ func (f *fakeService) TransferMilestone(_ string, _ string, _ int, issueNumber i
 }
 
 func pullRequest(state string) *github.PullRequest {
-	return &github.PullRequest{State: github.String(state)}
+	return &github.PullRequest{State: new(state)}
 }

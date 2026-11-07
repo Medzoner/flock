@@ -37,12 +37,54 @@ func TestRunReopensOnlyGateClosedPullRequests(t *testing.T) {
 }
 
 func TestRunClosesUnapprovedPullRequest(t *testing.T) {
-	api := &fakeService{pullRequest: pullRequest("open", "Fixes #73"), files: []*github.CommitFile{{Filename: github.String("internal/site.go")}}, issue: &github.Issue{State: github.String("open")}}
+	api := &fakeService{pullRequest: pullRequest("open", "Fixes #73"), files: []*github.CommitFile{{Filename: new("internal/site.go")}}, issue: &github.Issue{State: new("open")}}
 	if _, err := Run(api, "flock-php", "flock", Event{Action: "synchronize", Number: 87}); err != nil {
 		t.Fatal(err)
 	}
 	if api.state != "closed" || !api.commented {
 		t.Fatalf("state = %q, commented = %t", api.state, api.commented)
+	}
+}
+
+func TestRunDoesNotListFilesForApprovedIssue(t *testing.T) {
+	api := &fakeService{pullRequest: pullRequest("open", "Fixes #73"), issue: approvedIssue()}
+	result, err := Run(api, "flock-php", "flock", Event{Action: "opened", Number: 87})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ApprovedIssue == nil || result.ApprovedIssue.Number != 73 {
+		t.Fatalf("approved issue = %+v, want flock#73", result.ApprovedIssue)
+	}
+	if api.filesCalls != 0 {
+		t.Fatalf("Files() calls = %d, want 0", api.filesCalls)
+	}
+}
+
+func TestRunAllowsDocsOnlyPullRequestsWithoutAnApprovedIssue(t *testing.T) {
+	api := &fakeService{
+		pullRequest: pullRequest("open", ""),
+		files:       []*github.CommitFile{{Filename: new("docs/contributing.md")}},
+	}
+	if _, err := Run(api, "flock-php", "flock", Event{Action: "opened", Number: 87}); err != nil {
+		t.Fatal(err)
+	}
+	if api.filesCalls != 1 {
+		t.Fatalf("Files() calls = %d, want 1", api.filesCalls)
+	}
+	if api.state != "" || api.commented {
+		t.Fatalf("state = %q, commented = %t", api.state, api.commented)
+	}
+}
+
+func TestRunBypassesMaintainersWithoutCheckingIssuesOrFiles(t *testing.T) {
+	pr := pullRequest("open", "")
+	pr.AuthorAssociation = new("MEMBER")
+	api := &fakeService{pullRequest: pr}
+	if _, err := Run(api, "flock-php", "flock", Event{Action: "opened", Number: 87}); err != nil {
+		t.Fatal(err)
+	}
+	if api.issueCalls != 0 || api.filesCalls != 0 {
+		t.Fatalf("Issue() calls = %d, Files() calls = %d, want 0", api.issueCalls, api.filesCalls)
 	}
 }
 
@@ -53,15 +95,22 @@ type fakeService struct {
 	gateClosed  bool
 	state       string
 	commented   bool
+	filesCalls  int
+	issueCalls  int
 }
 
 func (f *fakeService) PullRequest(string, string, int) (*github.PullRequest, error) {
 	return f.pullRequest, nil
 }
-func (f *fakeService) Permission(string, string, string) (string, error)       { return "read", nil }
-func (f *fakeService) Files(string, string, int) ([]*github.CommitFile, error) { return f.files, nil }
-func (f *fakeService) Issue(string, string, int) (*github.Issue, error)        { return f.issue, nil }
-func (f *fakeService) GateClosed(string, string, int) (bool, error)            { return f.gateClosed, nil }
+func (f *fakeService) Files(string, string, int) ([]*github.CommitFile, error) {
+	f.filesCalls++
+	return f.files, nil
+}
+func (f *fakeService) Issue(string, string, int) (*github.Issue, error) {
+	f.issueCalls++
+	return f.issue, nil
+}
+func (f *fakeService) GateClosed(string, string, int) (bool, error) { return f.gateClosed, nil }
 func (f *fakeService) Comment(string, string, int, string) error {
 	f.commented = true
 	return nil
@@ -73,14 +122,14 @@ func (f *fakeService) SetPullRequestState(_ string, _ string, _ int, state strin
 
 func pullRequest(state, body string) *github.PullRequest {
 	return &github.PullRequest{
-		Number: github.Int(87),
-		State:  github.String(state),
-		Base:   &github.PullRequestBranch{Ref: github.String("main")},
-		Body:   github.String(body),
-		User:   &github.User{Login: github.String("contributor"), Type: github.String("User")},
+		Number: new(87),
+		State:  new(state),
+		Base:   &github.PullRequestBranch{Ref: new("main")},
+		Body:   new(body),
+		User:   &github.User{Login: new("contributor"), Type: new("User")},
 	}
 }
 
 func approvedIssue() *github.Issue {
-	return &github.Issue{State: github.String("open"), Labels: []*github.Label{{Name: openToAnyone}}}
+	return &github.Issue{State: new("open"), Labels: []*github.Label{{Name: openToAnyone}}}
 }

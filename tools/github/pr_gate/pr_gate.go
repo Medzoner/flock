@@ -15,7 +15,6 @@ const openToAnyone = "help wanted"
 
 type Service interface {
 	PullRequest(owner, repository string, number int) (*github.PullRequest, error)
-	Permission(owner, repository, username string) (string, error)
 	Files(owner, repository string, number int) ([]*github.CommitFile, error)
 	Issue(owner, repository string, number int) (*github.Issue, error)
 	GateClosed(owner, repository string, number int) (bool, error)
@@ -48,11 +47,7 @@ func Run(api Service, owner, repository string, event Event) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		permission, err := api.Permission(owner, repository, pr.GetUser().GetLogin())
-		if err != nil {
-			return Result{}, err
-		}
-		if bypassesGate(pr.GetUser(), pr.GetAuthorAssociation(), permission) {
+		if bypassesGate(pr.GetUser(), pr.GetAuthorAssociation()) {
 			return Result{}, nil
 		}
 		if pr.GetState() == "closed" {
@@ -77,16 +72,17 @@ func Run(api Service, owner, repository string, event Event) (Result, error) {
 		if event.Action == "edited" && !event.BaseEdited {
 			return Result{}, nil
 		}
+		if pr.GetBase().GetRef() != "main" {
+			return Result{}, closePullRequest(api, owner, repository, pr, closeWrongBase)
+		}
+		if issue, approved := firstApprovedIssue(api, owner, pr); approved {
+			return approvedResult(issue), nil
+		}
 		files, err := api.Files(owner, repository, pr.GetNumber())
 		if err != nil {
 			return Result{}, err
 		}
-		decision := evaluate(pr, permission, files)
-		if decision == closeUnapproved {
-			if issue, approved := firstApprovedIssue(api, owner, pr); approved {
-				return approvedResult(issue), nil
-			}
-		}
+		decision := evaluate(files)
 		if decision == allow {
 			return Result{}, nil
 		}
@@ -102,13 +98,7 @@ func approvedResult(issue issue_reference.Reference) Result {
 	return Result{ApprovedIssue: &issue}
 }
 
-func evaluate(pr *github.PullRequest, permission string, files []*github.CommitFile) action {
-	if bypassesGate(pr.GetUser(), pr.GetAuthorAssociation(), permission) {
-		return allow
-	}
-	if pr.GetBase().GetRef() != "main" {
-		return closeWrongBase
-	}
+func evaluate(files []*github.CommitFile) action {
 	if docsOnly(files) {
 		return allow
 	}
@@ -144,8 +134,8 @@ func closePullRequest(api Service, owner, repository string, pr *github.PullRequ
 	return api.SetPullRequestState(owner, repository, pr.GetNumber(), "closed")
 }
 
-func bypassesGate(user *github.User, authorAssociation, permission string) bool {
-	return user.GetType() == "Bot" || authorAssociation == "OWNER" || authorAssociation == "MEMBER" || authorAssociation == "COLLABORATOR" || permission == "admin" || permission == "write"
+func bypassesGate(user *github.User, authorAssociation string) bool {
+	return user.GetType() == "Bot" || authorAssociation == "OWNER" || authorAssociation == "MEMBER" || authorAssociation == "COLLABORATOR"
 }
 
 func docsOnly(files []*github.CommitFile) bool {

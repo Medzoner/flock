@@ -7,19 +7,20 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/google/go-github/v93/github"
+
 	"flock/tools/github/github_service"
 	"flock/tools/github/issue_triage"
 	"flock/tools/github/milestone_transfer"
 	"flock/tools/github/pr_gate"
 	"flock/tools/github/repository"
-	"github.com/google/go-github/v93/github"
 )
 
 func main() {
 	if len(os.Args) != 2 || (os.Args[1] != "pr" && os.Args[1] != "issue") {
 		fail(errors.New("usage: github pr | issue"))
 	}
-	owner, repository, err := repository.Parse(os.Getenv("GITHUB_REPOSITORY"))
+	owner, repo, err := repository.Parse(os.Getenv("GITHUB_REPOSITORY"))
 	if err != nil {
 		fail(err)
 	}
@@ -38,9 +39,9 @@ func main() {
 
 	switch os.Args[1] {
 	case "pr":
-		err = runPullRequestEvent(client, owner, repository, event)
+		err = runPullRequestEvent(client, owner, repo, event)
 	case "issue":
-		err = runIssueEvent(client, owner, repository, event)
+		err = runIssueEvent(client, owner, repo, event)
 	}
 	if err != nil {
 		fail(err)
@@ -83,6 +84,9 @@ func apiURL() string {
 }
 
 func fail(err error) {
-	fmt.Fprintln(os.Stderr, "github:", err)
+	_, _ = fmt.Fprintln(os.Stderr, "github:", err)
+	if err != nil {
+		return
+	}
 	os.Exit(1)
 }

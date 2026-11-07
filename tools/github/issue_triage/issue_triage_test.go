@@ -8,7 +8,7 @@ import (
 
 func TestRunLabelsOutsideContributor(t *testing.T) {
 	api := &fakeService{}
-	issue := &github.Issue{Number: github.Int(73), User: &github.User{Type: github.String("User")}}
+	issue := &github.Issue{Number: new(73), User: &github.User{Type: new("User")}}
 	if err := Run(api, "flock-php", "flock", issue); err != nil {
 		t.Fatal(err)
 	}

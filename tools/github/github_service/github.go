@@ -32,7 +32,7 @@ func New(baseURL, token string) (*Service, error) {
 	}
 	client, err := github.NewClient(
 		github.WithAuthToken(token),
-		github.WithURLs(github.String(parsed.String()), nil),
+		github.WithURLs(new(parsed.String()), nil),
 	)
 	if err != nil {
 		return nil, err
@@ -180,7 +180,7 @@ func (s *Service) Comment(owner, repository string, number int, body string) err
 }
 
 func (s *Service) SetPullRequestState(owner, repository string, number int, state string) error {
-	_, _, err := s.client.PullRequests.Edit(context.Background(), owner, repository, number, &github.PullRequest{State: github.String(state)})
+	_, _, err := s.client.PullRequests.Edit(context.Background(), owner, repository, number, &github.PullRequest{State: new(state)})
 	return err
 }
 
