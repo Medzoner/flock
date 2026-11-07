@@ -1,4 +1,4 @@
-// Command github-gate applies Flock's pull request and issue-triage policy in GitHub Actions.
+// Command github applies Flock's pull request and issue-triage policy in GitHub Actions.
 package main
 
 import (
@@ -10,7 +10,7 @@ import (
 
 func main() {
 	if len(os.Args) != 2 || (os.Args[1] != "pr" && os.Args[1] != "issue") {
-		fail(errors.New("usage: github-gate pr | issue"))
+		fail(errors.New("usage: github pr | issue"))
 	}
 	owner, repository, err := repositoryParts(os.Getenv("GITHUB_REPOSITORY"))
 	if err != nil {
@@ -77,6 +77,6 @@ func apiURL() string {
 }
 
 func fail(err error) {
-	fmt.Fprintln(os.Stderr, "github-gate:", err)
+	fmt.Fprintln(os.Stderr, "github:", err)
 	os.Exit(1)
 }
