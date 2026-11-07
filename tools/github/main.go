@@ -6,13 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"flock/tools/github/github_service"
+	"flock/tools/github/issue_triage"
+	"flock/tools/github/milestone_transfer"
+	"flock/tools/github/pr_gate"
+	"flock/tools/github/repository"
+	"github.com/google/go-github/v93/github"
 )
 
 func main() {
 	if len(os.Args) != 2 || (os.Args[1] != "pr" && os.Args[1] != "issue") {
 		fail(errors.New("usage: github pr | issue"))
 	}
-	owner, repository, err := repositoryParts(os.Getenv("GITHUB_REPOSITORY"))
+	owner, repository, err := repository.Parse(os.Getenv("GITHUB_REPOSITORY"))
 	if err != nil {
 		fail(err)
 	}
@@ -24,7 +31,10 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	client := NewClient(apiURL(), token)
+	client, err := github_service.New(apiURL(), token)
+	if err != nil {
+		fail(err)
+	}
 
 	switch os.Args[1] {
 	case "pr":
@@ -37,36 +47,32 @@ func main() {
 	}
 }
 
-func runPullRequestEvent(api GitHub, owner, repository string, data []byte) error {
-	var event struct {
-		Action      string `json:"action"`
-		PullRequest struct {
-			Number int `json:"number"`
-		} `json:"pull_request"`
-		Changes struct {
-			Body *json.RawMessage `json:"body"`
-			Base *json.RawMessage `json:"base"`
-		} `json:"changes"`
-	}
+func runPullRequestEvent(api *github_service.Service, owner, repository string, data []byte) error {
+	var event github.PullRequestEvent
 	if err := json.Unmarshal(data, &event); err != nil {
 		return err
 	}
-	return RunPRGate(api, owner, repository, PullRequestEvent{
-		Action:     event.Action,
-		Number:     event.PullRequest.Number,
-		BodyEdited: event.Changes.Body != nil,
-		BaseEdited: event.Changes.Base != nil,
+	result, err := pr_gate.Run(api, owner, repository, pr_gate.Event{
+		Action:     event.GetAction(),
+		Number:     event.GetPullRequest().GetNumber(),
+		BodyEdited: event.GetChanges().Body != nil,
+		BaseEdited: event.GetChanges().Base != nil,
 	})
+	if err != nil {
+		return err
+	}
+	if result.ApprovedIssue == nil {
+		return nil
+	}
+	return milestone_transfer.Run(api, owner, repository, event.GetPullRequest().GetNumber(), *result.ApprovedIssue)
 }
 
-func runIssueEvent(api GitHub, owner, repository string, data []byte) error {
-	var event struct {
-		Issue Issue `json:"issue"`
-	}
+func runIssueEvent(api *github_service.Service, owner, repository string, data []byte) error {
+	var event github.IssuesEvent
 	if err := json.Unmarshal(data, &event); err != nil {
 		return err
 	}
-	return RunIssueTriage(api, owner, repository, event.Issue)
+	return issue_triage.Run(api, owner, repository, event.GetIssue())
 }
 
 func apiURL() string {
