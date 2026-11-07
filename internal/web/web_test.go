@@ -1,6 +1,8 @@
 package web
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -45,6 +47,35 @@ func TestCaddyfileRoutesSitesAndSubdomains(t *testing.T) {
 		if !strings.Contains(cf, want) {
 			t.Errorf("missing %q in:\n%s", want, cf)
 		}
+	}
+}
+
+func TestCaddyfileImportsSiteDirectivesOnlyWhereTheSiteIsServed(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, ".flock", "Caddyfile")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("handle {\n\theader X-Flock-Custom yes\n\trespond custom 200\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig()
+	cfg.Sites[1].Caddyfile = file
+	cf := Caddyfile(cfg)
+	if got := strings.Count(cf, "import "+quote(file)); got != 1 {
+		t.Fatalf("custom Caddyfile imported %d times, want once in the serving block:\n%s", got, cf)
+	}
+	want := "\troute {\n\t\tabort @remote\n\t\timport " + quote(file)
+	if !strings.Contains(cf, want) {
+		t.Fatalf("custom handlers are not guarded by an ordered remote abort:\n%s", cf)
+	}
+	json, _, err := caddyconfig.GetAdapter("caddyfile").Adapt([]byte(cf), nil)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, cf)
+	}
+	if !strings.Contains(string(json), `"X-Flock-Custom"`) {
+		t.Fatalf("custom header missing from adapted config:\n%s", json)
 	}
 }
 

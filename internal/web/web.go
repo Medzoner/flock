@@ -27,7 +27,10 @@ type Site struct {
 	Domain  string   // e.g. watchtower.test
 	Aliases []string // other names served like Domain, e.g. watchtower-2.test
 	Root    string   // document root, e.g. <path>/public
-	FPM     []string // FastCGI upstreams: "unix/<socket>" (PHP-FPM) or "127.0.0.1:<port>" (php-cgi workers)
+	// Caddyfile is an optional file of HTTP handler directives imported into the ordered route that
+	// serves the site. It is not imported into the HTTP-to-HTTPS redirect or Flock's unlinked page.
+	Caddyfile string
+	FPM       []string // FastCGI upstreams: "unix/<socket>" (PHP-FPM) or "127.0.0.1:<port>" (php-cgi workers)
 	// DebugFPM are the upstreams of the pool that loads Xdebug. Requests that ask for Xdebug go
 	// there, and with Debugging (the project has breakpoints) every request does.
 	DebugFPM  []string
@@ -146,13 +149,13 @@ func Caddyfile(cfg Config) string {
 			hosts := hosts(name)
 
 			if s.CertFile != "" {
-				fmt.Fprintf(&b, "\n%s {\n\timport flock_site\n%s%s%s}\n", addresses("https", hosts, cfg), tlsBlock, app(s), upstreamDown(s, cfg))
+				fmt.Fprintf(&b, "\n%s {\n\timport flock_site\n%s%s%s%s}\n", addresses("https", hosts, cfg), tlsBlock, custom(s), app(s), upstreamDown(s, cfg))
 				fmt.Fprintf(&b, "\n%s {\n\timport flock_site\n\tredir https://{host}%s{uri} 308\n}\n",
 					addresses("http", hosts, cfg), portSuffix(cfg.HTTPSPort, 443))
 				continue
 			}
 
-			fmt.Fprintf(&b, "\n%s {\n\timport flock_site\n%s%s}\n", addresses("http", hosts, cfg), app(s), upstreamDown(s, cfg))
+			fmt.Fprintf(&b, "\n%s {\n\timport flock_site\n%s%s%s}\n", addresses("http", hosts, cfg), custom(s), app(s), upstreamDown(s, cfg))
 			// Over HTTPS, a site that isn't secured names itself, so the page asks to secure it rather than link it.
 			// A proxy says so too: the apps can't secure one yet, so the page offers only the command.
 			vars := fmt.Sprintf("\tvars flock_site %s\n", quote(siteName(s.Domain, cfg.TLD)))
@@ -269,6 +272,16 @@ func app(s Site) string {
 	}
 	return root + fmt.Sprintf("\t@xdebug expression `%s`\n\thandle @xdebug {\n%s\t}\n\thandle {\n%s\t}\n",
 		xdebugRequest, php(s.DebugFPM, "\t\t"), serve("\t\t"))
+}
+
+func custom(s Site) string {
+	if s.Caddyfile == "" {
+		return ""
+	}
+	// A route preserves the written order. Without it Caddy's directive sorting could put a
+	// custom terminating handler before flock_site's abort and expose a site when macOS requires
+	// Flock to bind privileged ports on every interface.
+	return fmt.Sprintf("\troute {\n\t\tabort @remote\n\t\timport %s\n\t}\n", quote(s.Caddyfile))
 }
 
 // proxy sends every request to a FrankenPHP process, which serves the static files too, or to a

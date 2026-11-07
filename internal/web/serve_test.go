@@ -60,6 +60,14 @@ func TestServesEveryDepthAliasAndCatchAllOverTrustedHTTPS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	custom := filepath.Join(dir, "site.Caddyfile")
+	if err := os.WriteFile(custom, []byte(`
+@cors_preflight method OPTIONS
+header Access-Control-Allow-Origin "https://admin.example.test"
+respond @cors_preflight 204
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	pool := x509.NewCertPool()
 	caPEM, _ := os.ReadFile(ca.CertPath())
 	pool.AppendCertsFromPEM(caPEM)
@@ -79,7 +87,7 @@ func TestServesEveryDepthAliasAndCatchAllOverTrustedHTTPS(t *testing.T) {
 			return leaves.Get(ca, name)
 		},
 		Sites: []Site{
-			{Domain: "app.test", Aliases: []string{"app-2.test"}, Root: dir, FPM: []string{"127.0.0.1:1"}, CertFile: certFile, KeyFile: keyFile},
+			{Domain: "app.test", Aliases: []string{"app-2.test"}, Root: dir, Caddyfile: custom, FPM: []string{"127.0.0.1:1"}, CertFile: certFile, KeyFile: keyFile},
 			{Domain: "plain.test", Root: dir, FPM: []string{"127.0.0.1:1"}},
 		},
 		Waiting: []Waiting{
@@ -122,6 +130,20 @@ func TestServesEveryDepthAliasAndCatchAllOverTrustedHTTPS(t *testing.T) {
 		return resp, string(body), nil
 	}
 	https := func(host string) string { return fmt.Sprintf("https://%s:%d/", host, cfg.HTTPSPort) }
+
+	preflight, err := http.NewRequest(http.MethodOptions, https("app.test"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight.Header.Set("Origin", "https://admin.example.test")
+	resp, err := client.Do(preflight)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent || resp.Header.Get("Access-Control-Allow-Origin") != "https://admin.example.test" {
+		t.Errorf("custom Caddy directives: status %d, headers %v", resp.StatusCode, resp.Header)
+	}
 
 	// The site answers (with a 502, as nothing runs PHP here) on every depth and alias, and the
 	// certificate verifies against the Flock CA alone.
