@@ -97,7 +97,7 @@ A proxy's name can't be a linked site's: Flock refuses it. A folder of the same 
 
 ## Custom Caddy handlers
 
-Put a `.flock/Caddyfile` in a PHP project to add [HTTP handler directives](https://caddyserver.com/docs/caddyfile/directives) to the site. Flock imports the file into an ordered `route`, after its local-access guard, and reloads it when the file changes. Write handlers only, without a site address or surrounding braces. Site options such as `tls` and `handle_errors` aren't supported there.
+Put a `.flock/Caddyfile` in a PHP project to add [HTTP handler directives](https://caddyserver.com/docs/caddyfile/directives) to the site. Flock loads its handlers into an ordered `route`, after its local-access guard, and reloads them when the file changes. Write handlers only, without a site address or surrounding braces. Site options such as `tls` and `handle_errors` aren't supported there.
 
 For example, this allows a separate frontend to call the site and answers CORS preflight requests:
 

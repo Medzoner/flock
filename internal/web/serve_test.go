@@ -39,6 +39,103 @@ func freePort(t *testing.T) int {
 	return 0
 }
 
+func nonLoopbackIPv4(t *testing.T) string {
+	t.Helper()
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addresses, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			ip, _, err := net.ParseCIDR(address.String())
+			if err == nil && ip.To4() != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
+				return ip.String()
+			}
+		}
+	}
+	t.Skip("no non-loopback IPv4 address")
+	return ""
+}
+
+// TestCustomHandlersCannotBypassRemoteGuard runs the adapted handler chain on a wildcard listener.
+// Custom terminating handle and route directives work over loopback, but a connection through a
+// non-loopback interface is aborted before either can answer.
+func TestCustomHandlersCannotBypassRemoteGuard(t *testing.T) {
+	dir, err := os.MkdirTemp("", "flock-web-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	port := freePort(t)
+	cfg := Config{
+		StorageDir: filepath.Join(dir, "caddy"),
+		LogFile:    filepath.Join(dir, "web.log"),
+		HTTPPort:   port,
+		HTTPSPort:  freePort(t),
+		TLD:        "test",
+		Sites: []Site{{
+			Domain: "app.test", Root: dir, FPM: []string{"127.0.0.1:1"},
+			Handlers: `
+handle /handled {
+	respond "handled" 200
+}
+route {
+	@custom_route path /routed
+	respond @custom_route "routed" 200
+}`,
+		}},
+	}
+	if err := Apply(cfg); err != nil {
+		t.Fatalf("%v\n%s", err, Caddyfile(cfg))
+	}
+	t.Cleanup(func() { _ = Stop() })
+
+	client := func(target string) *http.Client {
+		return &http.Client{
+			Timeout: 5 * time.Second,
+			Transport: &http.Transport{
+				DisableKeepAlives: true,
+				DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(target, fmt.Sprint(port)))
+				},
+			},
+		}
+	}
+	url := func(path string) string { return fmt.Sprintf("http://app.test:%d%s", port, path) }
+	for path, want := range map[string]string{"/handled": "handled", "/routed": "routed"} {
+		resp, err := client("127.0.0.1").Get(url(path))
+		if err != nil {
+			t.Fatalf("loopback %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(body) != want {
+			t.Fatalf("loopback %s: got %d %q, want 200 %q", path, resp.StatusCode, body, want)
+		}
+	}
+
+	remote := nonLoopbackIPv4(t)
+	address := net.JoinHostPort(remote, fmt.Sprint(port))
+	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
+	if err != nil {
+		t.Fatalf("wildcard listener is not reachable through %s: %v", address, err)
+	}
+	conn.Close()
+	for _, path := range []string{"/handled", "/routed"} {
+		if resp, err := client(remote).Get(url(path)); err == nil {
+			resp.Body.Close()
+			t.Fatalf("non-loopback request reached the custom handler at %s: %d", path, resp.StatusCode)
+		}
+	}
+}
+
 // TestServesEveryDepthAliasAndCatchAllOverTrustedHTTPS runs the embedded Caddy and makes real
 // TLS handshakes, verifying the certificates against the Flock CA alone.
 func TestServesEveryDepthAliasAndCatchAllOverTrustedHTTPS(t *testing.T) {
@@ -68,6 +165,10 @@ respond @cors_preflight 204
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	customHandlers, err := os.ReadFile(custom)
+	if err != nil {
+		t.Fatal(err)
+	}
 	pool := x509.NewCertPool()
 	caPEM, _ := os.ReadFile(ca.CertPath())
 	pool.AppendCertsFromPEM(caPEM)
@@ -87,7 +188,7 @@ respond @cors_preflight 204
 			return leaves.Get(ca, name)
 		},
 		Sites: []Site{
-			{Domain: "app.test", Aliases: []string{"app-2.test"}, Root: dir, Caddyfile: custom, FPM: []string{"127.0.0.1:1"}, CertFile: certFile, KeyFile: keyFile},
+			{Domain: "app.test", Aliases: []string{"app-2.test"}, Root: dir, Handlers: string(customHandlers), FPM: []string{"127.0.0.1:1"}, DebugFPM: []string{"127.0.0.1:2"}, CertFile: certFile, KeyFile: keyFile},
 			{Domain: "plain.test", Root: dir, FPM: []string{"127.0.0.1:1"}},
 		},
 		Waiting: []Waiting{

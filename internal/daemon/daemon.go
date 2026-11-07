@@ -700,7 +700,14 @@ func (d *daemon) reload() error {
 			continue
 		}
 
-		ws := web.Site{Domain: domain, Aliases: aliases, Root: root.Dir, Caddyfile: caddyfile(site.Path)}
+		ws := web.Site{Domain: domain, Aliases: aliases, Root: root.Dir}
+		if file := caddyfile(site.Path); file != "" {
+			data, readErr := os.ReadFile(file)
+			if readErr != nil {
+				return fmt.Errorf("read %s: %w", file, readErr)
+			}
+			ws.Handlers = string(data)
+		}
 		if cfg.Xdebug {
 			ws.DebugFPM = debugPool(version)
 		}

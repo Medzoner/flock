@@ -50,8 +50,8 @@ func TestCaddyfileRoutesSitesAndSubdomains(t *testing.T) {
 	}
 }
 
-func TestCaddyfileImportsSiteDirectivesOnlyWhereTheSiteIsServed(t *testing.T) {
-	dir := t.TempDir()
+func TestCaddyfileIncludesSiteHandlersFromBracketedProjectPath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "app [local]")
 	file := filepath.Join(dir, ".flock", "Caddyfile")
 	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		t.Fatal(err)
@@ -61,12 +61,17 @@ func TestCaddyfileImportsSiteDirectivesOnlyWhereTheSiteIsServed(t *testing.T) {
 	}
 
 	cfg := testConfig()
-	cfg.Sites[1].Caddyfile = file
-	cf := Caddyfile(cfg)
-	if got := strings.Count(cf, "import "+quote(file)); got != 1 {
-		t.Fatalf("custom Caddyfile imported %d times, want once in the serving block:\n%s", got, cf)
+	cfg.Sites[1].Root = dir
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
 	}
-	want := "\troute {\n\t\tabort @remote\n\t\timport " + quote(file)
+	cfg.Sites[1].Handlers = string(data)
+	cf := Caddyfile(cfg)
+	if strings.Contains(cf, "import "+quote(file)) {
+		t.Fatalf("custom Caddyfile path must not be passed through Caddy's glob import:\n%s", cf)
+	}
+	want := "\troute {\n\t\tabort @remote\n\t\troot * " + quote(dir) + "\n\t\thandle {"
 	if !strings.Contains(cf, want) {
 		t.Fatalf("custom handlers are not guarded by an ordered remote abort:\n%s", cf)
 	}
