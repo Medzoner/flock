@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,5 +201,59 @@ func TestCaddyfileProxiesNamesToTheirServer(t *testing.T) {
 	}
 	if strings.Contains(cf, `root * ""`) {
 		t.Errorf("a proxy has no document root:\n%s", cf)
+	}
+}
+
+// TestCaddyfileRejectsRemoteClientsBeforeAnyHandler checks the adapted config of every kind of
+// block: Caddy sorts handle and route before abort, so a site's Xdebug handle pair must not run
+// before the remote guard.
+func TestCaddyfileRejectsRemoteClientsBeforeAnyHandler(t *testing.T) {
+	cfg := testConfig()
+	cfg.Sites = append(cfg.Sites,
+		Site{Domain: "xdebug.test", Root: "/code/xdebug/public", FPM: []string{"unix//run/php85.sock"}, DebugFPM: []string{"unix//run/php85-xdebug.sock"}},
+		Site{Domain: "franken.test", Root: "/code/franken/public", Proxy: "127.0.0.1:21000", DebugFPM: []string{"unix//run/php84-xdebug.sock"}},
+	)
+
+	adapted, _, err := caddyconfig.GetAdapter("caddyfile").Adapt([]byte(Caddyfile(cfg)), nil)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, Caddyfile(cfg))
+	}
+	type route struct {
+		Match  []map[string]any `json:"match"`
+		Handle []struct {
+			Handler string  `json:"handler"`
+			Abort   bool    `json:"abort"`
+			Routes  []route `json:"routes"`
+		} `json:"handle"`
+	}
+	var parsed struct {
+		Apps struct {
+			HTTP struct {
+				Servers map[string]struct {
+					Routes []route `json:"routes"`
+				} `json:"servers"`
+			} `json:"http"`
+		} `json:"apps"`
+	}
+	if err := json.Unmarshal(adapted, &parsed); err != nil {
+		t.Fatal(err)
+	}
+
+	checked := 0
+	for name, server := range parsed.Apps.HTTP.Servers {
+		for i, r := range server.Routes {
+			// A site block is a host-matched route around a subroute of its directives.
+			first := r
+			if len(r.Handle) == 1 && r.Handle[0].Handler == "subroute" && len(r.Handle[0].Routes) > 0 {
+				first = r.Handle[0].Routes[0]
+			}
+			if len(first.Handle) == 0 || first.Handle[0].Handler != "static_response" || !first.Handle[0].Abort {
+				t.Errorf("%s route %d (%v) does not start with the remote abort", name, i, r.Match)
+			}
+			checked++
+		}
+	}
+	if checked == 0 {
+		t.Fatalf("no routes in:\n%s", adapted)
 	}
 }

@@ -117,11 +117,14 @@ func hosts(name string) []string {
 func Caddyfile(cfg Config) string {
 	var b strings.Builder
 
+	// Caddy sorts handle and route before abort. "order abort first" keeps the remote guard ahead
+	// of every handler, such as a site's Xdebug handle pair, also on the wildcard listener.
 	fmt.Fprintf(&b, `{
 	admin off
 	persist_config off
 	auto_https disable_certs
 	skip_install_trust
+	order abort first
 	http_port %d
 	https_port %d
 	storage file_system %s
