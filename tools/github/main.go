@@ -53,12 +53,7 @@ func runPullRequestEvent(api *github_service.Service, owner, repository string, 
 	if err := json.Unmarshal(data, &event); err != nil {
 		return err
 	}
-	result, err := pr_gate.Run(api, owner, repository, pr_gate.Event{
-		Action:     event.GetAction(),
-		Number:     event.GetPullRequest().GetNumber(),
-		BodyEdited: event.GetChanges().Body != nil,
-		BaseEdited: event.GetChanges().Base != nil,
-	})
+	result, err := pr_gate.Run(api, owner, repository, pullRequestGateEvent(&event))
 	if err != nil {
 		return err
 	}
@@ -66,6 +61,16 @@ func runPullRequestEvent(api *github_service.Service, owner, repository string, 
 		return nil
 	}
 	return milestone_transfer.Run(api, owner, repository, event.GetPullRequest().GetNumber(), *result.ApprovedIssue)
+}
+
+func pullRequestGateEvent(event *github.PullRequestEvent) pr_gate.Event {
+	changes := event.GetChanges()
+	return pr_gate.Event{
+		Action:     event.GetAction(),
+		Number:     event.GetPullRequest().GetNumber(),
+		BodyEdited: changes != nil && changes.Body != nil,
+		BaseEdited: changes != nil && changes.Base != nil,
+	}
 }
 
 func runIssueEvent(api *github_service.Service, owner, repository string, data []byte) error {
@@ -85,8 +90,5 @@ func apiURL() string {
 
 func fail(err error) {
 	_, _ = fmt.Fprintln(os.Stderr, "github:", err)
-	if err != nil {
-		return
-	}
 	os.Exit(1)
 }
