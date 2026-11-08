@@ -8,14 +8,17 @@ package web
 import (
 	"crypto/tls"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	_ "github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	_ "github.com/caddyserver/caddy/v2/modules/standard"
 
@@ -263,9 +266,9 @@ func app(s Site) string {
 		return root(s, "\t") + dispatch(s, "\t")
 	}
 
-	// A route preserves the written order. The remote abort must run before any custom terminating
-	// handler, and the custom handlers must run before the Xdebug/default handle pair.
-	return "\troute {\n\t\tabort @remote\n" + root(s, "\t\t") + handlers(s.Handlers, "\t\t") + dispatch(s, "\t\t") + "\t}\n"
+	// A route keeps the written order, so the custom handlers run before the Xdebug/default handle
+	// pair. The remote abort still runs first: it is ordered before every directive, route too.
+	return "\troute {\n" + root(s, "\t\t") + handlers(s.Handlers, "\t\t") + dispatch(s, "\t\t") + "\t}\n"
 }
 
 func root(s Site, indent string) string {
@@ -291,11 +294,67 @@ func dispatch(s Site, indent string) string {
 }
 
 func handlers(caddy, indent string) string {
-	caddy = strings.TrimSpace(caddy)
+	caddy = strings.TrimSpace(strings.ReplaceAll(caddy, "\r\n", "\n"))
 	if caddy == "" {
 		return ""
 	}
 	return indent + strings.ReplaceAll(caddy, "\n", "\n"+indent) + "\n"
+}
+
+// CheckHandlers reports whether s.Handlers can be served: the directives must stay inside the
+// site's route (balanced braces), import nothing, and adapt in the site exactly as it is served,
+// e.g. without a matcher named like one of Flock's. Errors name the lines as name:line.
+func CheckHandlers(s Site, name string) error {
+	text := strings.ReplaceAll(s.Handlers, "\r\n", "\n")
+	tokens, err := caddyfile.Tokenize([]byte(text), name)
+	if err != nil {
+		return err
+	}
+	depth := 0
+	for i, t := range tokens {
+		if t.Quoted() {
+			continue
+		}
+		switch {
+		case t.Text == "{":
+			depth++
+		case t.Text == "}":
+			if depth--; depth < 0 {
+				return fmt.Errorf("%s:%d: } without a matching {", name, t.Line)
+			}
+		case t.Text == "import" && (i == 0 || tokens[i-1].Line+tokens[i-1].NumLineBreaks() < t.Line):
+			return fmt.Errorf("%s:%d: import isn't supported here", name, t.Line)
+		}
+	}
+	if depth > 0 {
+		return fmt.Errorf("%s: %d { without a matching }", name, depth)
+	}
+
+	// Adapt the site on its own and point the error at the line of the file, not of the config.
+	const placeholder = "flock-site-handlers"
+	cf := Caddyfile(Config{StorageDir: "caddy", LogFile: "web.log", HTTPPort: 80, HTTPSPort: 443, TLD: "test", Sites: []Site{s}})
+	first := strings.Index(cf, handlers(s.Handlers, "\t\t"))
+	if first < 0 {
+		return nil
+	}
+	trimmed := len(text) - len(strings.TrimLeft(text, " \t\n"))
+	offset := strings.Count(cf[:first], "\n") - strings.Count(text[:trimmed], "\n")
+	lines := strings.Count(strings.TrimRight(text, " \t\n"), "\n") + 1
+	if _, _, err := caddyconfig.GetAdapter("caddyfile").Adapt([]byte(cf), map[string]any{"filename": placeholder}); err != nil {
+		at := regexp.MustCompile(`,? at ` + placeholder + `:(\d+)`)
+		message := at.ReplaceAllStringFunc(err.Error(), func(m string) string {
+			n, _ := strconv.Atoi(at.FindStringSubmatch(m)[1])
+			if n -= offset; n < 1 || n > lines {
+				return ""
+			}
+			return fmt.Sprintf(", at %s:%d", name, n)
+		})
+		if !strings.Contains(message, name) {
+			message = name + ": " + message
+		}
+		return errors.New(message)
+	}
+	return nil
 }
 
 // proxy sends every request to a FrankenPHP process, which serves the static files too, or to a

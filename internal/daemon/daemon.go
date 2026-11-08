@@ -442,7 +442,12 @@ func (d *daemon) projectFiles() string {
 				fmt.Fprintf(&b, "%s\n", file)
 			}
 		}
-		if file := caddyfile(site.Path); file != "" {
+		// The settings files and the Caddy directives they name (see siteHandlers).
+		files := project.SettingsFiles(cfg, site)
+		if file, _, _ := project.CaddyFile(cfg, site); file != "" {
+			files = append(files, file)
+		}
+		for _, file := range files {
 			if info, err := os.Stat(file); err == nil {
 				fmt.Fprintf(&b, "%s %d %d\n", file, info.Size(), info.ModTime().UnixNano())
 			}
@@ -451,22 +456,29 @@ func (d *daemon) projectFiles() string {
 	return b.String()
 }
 
-// caddyfile returns a site's optional project-specific Caddy directives file. It is Caddyfile in
-// the project by default; FLOCK_CADDYFILE in .env may name another file, relative to the project.
-func caddyfile(project string) string {
-	file := filepath.Join(project, "Caddyfile")
-	if env, err := worktree.ReadDotenv(filepath.Join(project, ".env")); err == nil {
-		if configured := env.Get("FLOCK_CADDYFILE"); configured != "" {
-			file = configured
-			if !filepath.IsAbs(file) {
-				file = filepath.Join(project, file)
-			}
-		}
+// siteHandlers reads the Caddy directives a site's flock.yml or flock.local.yml names with
+// `caddyfile:` (see project.CaddyFile) and checks them in ws, the site as it is served. A problem
+// is a warning: the site is served without them, and the other sites aren't affected.
+func siteHandlers(cfg *config.Config, site config.Site, ws web.Site) (handlers, problem string) {
+	file, from, err := project.CaddyFile(cfg, site)
+	if err != nil {
+		return "", fmt.Sprintf("caddyfile: %s: %v", site.Name, err)
 	}
-	if info, err := os.Stat(file); err == nil && !info.IsDir() {
-		return file
+	if file == "" {
+		return "", ""
 	}
-	return ""
+	data, err := os.ReadFile(file)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Sprintf("caddyfile: %s: %s names %s, which doesn't exist", site.Name, from, file)
+	}
+	if err != nil {
+		return "", fmt.Sprintf("caddyfile: %s: %v", site.Name, err)
+	}
+	ws.Handlers = string(data)
+	if err := web.CheckHandlers(ws, file); err != nil {
+		return "", fmt.Sprintf("caddyfile: %s is served without its directives: %v", site.Name, err)
+	}
+	return ws.Handlers, ""
 }
 
 // breakpointInterval is how often the sites' PhpStorm workspaces are checked for breakpoints.
@@ -710,13 +722,6 @@ func (d *daemon) reload() error {
 		}
 
 		ws := web.Site{Domain: domain, Aliases: aliases, Root: root.Dir}
-		if file := caddyfile(site.Path); file != "" {
-			data, readErr := os.ReadFile(file)
-			if readErr != nil {
-				return fmt.Errorf("read %s: %w", file, readErr)
-			}
-			ws.Handlers = string(data)
-		}
 		if cfg.Xdebug {
 			ws.DebugFPM = debugPool(version)
 		}
@@ -758,6 +763,12 @@ func (d *daemon) reload() error {
 		status.URL = scheme + "://" + domain + portSuffix(scheme, cfg)
 		shareables[site.Name] = shareable{root: ws.Root, version: version}
 
+		// Checked once the site is complete: its directives adapt in the block it is served with.
+		if handlers, problem := siteHandlers(cfg, site, ws); problem != "" {
+			warnings = append(warnings, problem)
+		} else {
+			ws.Handlers = handlers
+		}
 		webSites = append(webSites, ws)
 		domains = append(append(domains, domain), served...)
 		statuses = append(statuses, status)
